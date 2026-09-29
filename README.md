@@ -300,7 +300,25 @@ Frontend is live at → `http://localhost:5173`
 
 ---
 
-### 4. One-Click Start (Windows)
+### 4. Docker Deployment
+
+This project also supports containerized deployment with Docker Compose.
+
+```bash
+# From the repo root
+docker compose up --build
+```
+
+This starts:
+- Backend API at `http://localhost:8000`
+- Frontend at `http://localhost:5173`
+- PostgreSQL at `localhost:5432`
+
+Use the same demo credentials listed below after the containers start.
+
+---
+
+### 5. One-Click Start (Windows)
 
 ```bash
 # From the repo root — starts both servers in separate terminals
@@ -309,7 +327,7 @@ start.bat
 
 ---
 
-### 5. Demo Credentials
+### 6. Demo Credentials
 
 | Role | Email | Password |
 |---|---|---|

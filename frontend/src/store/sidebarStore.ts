@@ -12,10 +12,10 @@ interface SidebarStore {
 }
 
 export const useSidebarStore = create<SidebarStore>((set) => ({
-  isExpanded: false,
+  isExpanded: true,
   toggle:      () => set((s) => ({ isExpanded: !s.isExpanded })),
   setExpanded: (v)  => set({ isExpanded: v }),
-}));
+}))
 
 /** Pixel widths that match the Tailwind classes used in Sidebar */
 export const SIDEBAR_COLLAPSED_W = 72;   // w-[72px]
