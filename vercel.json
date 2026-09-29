@@ -1,6 +1,5 @@
-﻿{
+{
   "$schema": "https://openapi.vercel.sh/vercel.json",
-
   "services": {
     "frontend": {
       "root": "frontend/",
@@ -8,23 +7,20 @@
       "buildCommand": "npm run build",
       "outputDirectory": "dist",
       "installCommand": "npm install",
-      "bindings": [
+      "rewrites": [
         {
-          "type": "service",
-          "service": "backend",
-          "format": "url",
-          "env": "VITE_API_URL"
+          "source": "/(.*)",
+          "destination": "/"
         }
       ]
     },
-
     "backend": {
       "root": "backend/",
+      "framework": "fastapi",
       "entrypoint": "main:app",
       "installCommand": "pip install -r requirements-demo.txt"
     }
   },
-
   "rewrites": [
     {
       "source": "/api/(.*)",

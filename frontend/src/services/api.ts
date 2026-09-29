@@ -15,7 +15,8 @@ import {
 
 // VITE_API_URL is injected by the Vercel Services binding at build time.
 // Locally it reads from frontend/.env (http://localhost:8000).
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_URL
+  || (import.meta.env.PROD ? '' : 'http://localhost:8000');
 
 const api = axios.create({
   baseURL: API_BASE_URL,
