@@ -1,21 +1,28 @@
 import { useDigitalTwinStore } from '../store/digitalTwinStore';
 import { useState } from 'react';
+import { useParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { Settings, Play, TrendingUp, TrendingDown } from 'lucide-react';
 
 export default function Optimization() {
-  const { telemetry } = useDigitalTwinStore();
+  const { telemetry, css } = useDigitalTwinStore();
+  const { wellId = 'well-14' } = useParams<{ wellId: string }>();
   const [optimizationResult, setOptimizationResult] = useState<any>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const runOptimization = async () => {
     setIsRunning(true);
+    setError(null);
     try {
       const result = await apiService.runOptimization({
         objectives: { maximize_production: true, minimize_energy: true, minimize_rod_float_risk: true },
-      });
+      }, wellId);
       setOptimizationResult(result);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error('Optimization failed:', e);
+      setError('Optimization failed. Check the backend connection.');
+    }
     finally { setIsRunning(false); }
   };
 
@@ -23,7 +30,7 @@ export default function Optimization() {
     <div className="p-6 h-full">
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-stone-900 mb-1">Optimization Center</h2>
-        <p className="text-muted text-sm">Multi-objective optimization for CSS and SRP</p>
+        <p className="text-muted text-sm">Model-based SRP speed sweep with production, energy, and rod-float objectives</p>
       </div>
 
       <div className="grid grid-cols-12 gap-6 h-[calc(100vh-150px)]">
@@ -39,7 +46,7 @@ export default function Optimization() {
                   <span className="text-sm font-bold text-green">MAXIMIZE</span>
                 </div>
                 <div className="space-y-2">
-                  {['Oil Production', 'Recovery'].map((l) => (
+                  {['Oil Production'].map((l) => (
                     <div key={l} className="flex items-center justify-between">
                       <span className="text-xs text-muted">{l}</span>
                       <span className="text-xs text-green font-bold">●</span>
@@ -53,7 +60,7 @@ export default function Optimization() {
                   <span className="text-sm font-bold text-critical">MINIMIZE</span>
                 </div>
                 <div className="space-y-2">
-                  {['SOR','Energy','Rod Float Risk','Impact Loading','Mechanical Stress','Downtime'].map((l) => (
+                  {['Energy', 'Rod Float Risk'].map((l) => (
                     <div key={l} className="flex items-center justify-between">
                       <span className="text-xs text-muted">{l}</span>
                       <span className="text-xs text-critical font-bold">●</span>
@@ -67,6 +74,8 @@ export default function Optimization() {
               <Play className="w-4 h-4" />
               {isRunning ? 'RUNNING OPTIMIZATION…' : 'RUN OPTIMIZATION'}
             </button>
+            {error && <p className="mt-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</p>}
+            <p className="mt-3 text-xs text-muted">Evaluates SRP speed scenarios on model copies; it does not apply the recommendation or control equipment. CSS cycle optimization is on the CSS page.</p>
           </div>
 
           {optimizationResult && (
@@ -100,11 +109,11 @@ export default function Optimization() {
                 <p className="text-xs text-muted font-bold mb-3 uppercase tracking-wide">Expected Improvement</p>
                 <div className="grid grid-cols-3 gap-4">
                   {[
-                    { label: 'Energy Savings',       value: `${optimizationResult.recommendation.expected_improvement.energy_savings.toFixed(1)}%`                                },
-                    { label: 'Rod Float Reduction',  value: `${optimizationResult.recommendation.expected_improvement.rod_float_risk_reduction.toFixed(1)}%`                       },
+                    { label: 'Energy Savings', value: `${optimizationResult.recommendation.expected_improvement.energy_savings >= 0 ? '+' : ''}${optimizationResult.recommendation.expected_improvement.energy_savings.toFixed(1)}%`, cls: optimizationResult.recommendation.expected_improvement.energy_savings >= 0 ? 'text-green' : 'text-amber' },
+                    { label: 'Rod Float Reduction', value: `${optimizationResult.recommendation.expected_improvement.rod_float_risk_reduction >= 0 ? '+' : ''}${optimizationResult.recommendation.expected_improvement.rod_float_risk_reduction.toFixed(1)}%`, cls: optimizationResult.recommendation.expected_improvement.rod_float_risk_reduction >= 0 ? 'text-green' : 'text-amber' },
                     { label: 'Production Change',    value: `${optimizationResult.recommendation.expected_improvement.production_change >= 0 ? '+' : ''}${optimizationResult.recommendation.expected_improvement.production_change.toFixed(1)}%`,
                       cls: optimizationResult.recommendation.expected_improvement.production_change >= 0 ? 'text-green' : 'text-amber' },
-                  ].map(({ label, value, cls = 'text-green' }) => (
+                  ].map(({ label, value, cls }) => (
                     <div key={label} className="text-center">
                       <p className="text-xs text-muted mb-1">{label}</p>
                       <p className={`text-lg font-bold font-mono ${cls}`}>{value}</p>
@@ -118,11 +127,11 @@ export default function Optimization() {
 
         <div className="col-span-4 space-y-4">
           <div className="glass-panel rounded-xl p-4">
-            <h3 className="text-sm font-bold text-stone-900 mb-3 uppercase tracking-wide">Joint Optimization</h3>
+            <h3 className="text-sm font-bold text-stone-900 mb-3 uppercase tracking-wide">Optimization Scope</h3>
             <div className="space-y-2.5">
               {[
-                { label: 'CSS Optimization', value: '● ACTIVE', cls: 'text-green' },
-                { label: 'SRP Optimization', value: '● ACTIVE', cls: 'text-green' },
+                { label: 'CSS Optimization', value: 'Separate CSS page', cls: 'text-stone-600' },
+                { label: 'SRP Optimization', value: optimizationResult ? 'Scenarios evaluated' : 'Ready to run', cls: 'text-cyan' },
               ].map(({ label, value, cls }) => (
                 <div key={label} className="flex items-center justify-between">
                   <span className="text-xs text-muted">{label}</span>
@@ -130,7 +139,7 @@ export default function Optimization() {
                 </div>
               ))}
               <div className="h-px bg-stone-100" />
-              <p className="text-xs text-muted">Synchronized optimization of CSS timing and SRP parameters for maximum efficiency</p>
+              <p className="text-xs text-muted">SRP speed candidates are scored against the selected production, energy, and rod-float objectives. CSS timing is evaluated separately.</p>
             </div>
           </div>
 
@@ -141,7 +150,7 @@ export default function Optimization() {
                 {[
                   { label: 'SPM',           value: `${optimizationResult.recommendation.spm.toFixed(1)}`         },
                   { label: 'VFD Frequency', value: `${optimizationResult.recommendation.vfd_frequency.toFixed(1)} Hz` },
-                  { label: 'Stroke Profile',value: 'Asymmetric'                                                   },
+                  { label: 'Stroke Profile',value: 'Not evaluated by this model'                                  },
                 ].map(({ label, value }) => (
                   <div key={label} className="flex items-center justify-between">
                     <span className="text-xs text-muted">{label}</span>
@@ -157,8 +166,8 @@ export default function Optimization() {
             <div className="space-y-2.5">
               {[
                 { label: 'Production Rate', value: `${telemetry.production_rate.toFixed(1)} m³/d` },
-                { label: 'Steam-Oil Ratio', value: '3.5'                                           },
-                { label: 'Energy/Barrel',   value: '2.1 GJ'                                        },
+                { label: 'CSS Steam-Oil Ratio', value: `${css.steam_oil_ratio.toFixed(2)}` },
+                { label: 'Steam Injection', value: `${css.steam_injection_rate.toFixed(1)} t/d` },
                 { label: 'Pump Efficiency', value: `${(telemetry.pump_efficiency*100).toFixed(0)}%` },
               ].map(({ label, value }) => (
                 <div key={label} className="flex items-center justify-between">

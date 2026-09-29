@@ -116,7 +116,7 @@ export default function Header() {
             ? <Wifi    className="w-3.5 h-3.5 text-green shrink-0" />
             : <WifiOff className="w-3.5 h-3.5 text-red-500 shrink-0" />}
           <span className="text-xs text-stone-500 whitespace-nowrap">
-            {t('nav.sensorNetwork')}:&nbsp;
+            Digital Twin API:&nbsp;
             <span className={`font-semibold ${isConnected ? 'text-green' : 'text-red-500'}`}>
               ●&nbsp;{isConnected ? t('nav.connected') : t('nav.disconnected')}
             </span>

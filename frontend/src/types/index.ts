@@ -22,6 +22,7 @@ export interface Telemetry {
   pump_efficiency: number;
   production_rate: number;
   energy_consumption: number;
+  steam_injection_rate: number;
 }
 
 export interface ReservoirState {
@@ -34,7 +35,7 @@ export interface ReservoirState {
 }
 
 export interface CSSState {
-  cycle_number: number;
+  cycle_number: number | null;
   phase: string;
   days_in_phase: number;
   steam_injection_rate: number;
@@ -46,6 +47,10 @@ export interface CSSState {
   status: string;
   current_temperature: number;
   current_viscosity: number;
+  steam_volume?: number;
+  injection_duration?: number;
+  soak_duration?: number;
+  production_duration?: number;
 }
 
 export interface WellboreState {
@@ -69,6 +74,7 @@ export interface SRPState {
   downhole_pressure: number;
   displacement: number[];
   velocity: number[];
+  stress?: number[];
   status: string;
 }
 
@@ -95,6 +101,7 @@ export interface AIInsights {
   recommended_vfd_frequency: number;
   confidence: number;
   reasoning: string[];
+  model_type?: string;
   physics_evidence: {
     temperature: number;
     viscosity: number;
@@ -119,6 +126,7 @@ export interface Alert {
 export interface DigitalTwinState {
   well: Well;
   telemetry: Telemetry;
+  css: CSSState;
   reservoir: ReservoirState;
   wellbore: WellboreState;
   srp: SRPState;
@@ -127,6 +135,7 @@ export interface DigitalTwinState {
   alerts: Alert[];
   currentScenario: string;
   isConnected: boolean;
+  isStreaming: boolean;
   isLoading: boolean;
 }
 

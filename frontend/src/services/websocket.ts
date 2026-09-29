@@ -4,18 +4,26 @@ class WebSocketService {
   private ws: WebSocket | null = null;
   private reconnectInterval: number = 5000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private currentUrl: string | null = null;
+  private shouldReconnect = false;
   private messageHandler: ((data: Telemetry) => void) | null = null;
   private openHandler:    (() => void) | null = null;
   private closeHandler:   (() => void) | null = null;
 
   connect(url: string) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.currentUrl === url && this.ws
+      && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
+    this.disconnect();
+    this.currentUrl = url;
+    this.shouldReconnect = true;
 
-    this.ws = new WebSocket(url);
+    const socket = new WebSocket(url);
+    this.ws = socket;
 
-    this.ws.onopen = () => {
+    socket.onopen = () => {
+      if (this.ws !== socket) return;
       console.log('WebSocket connected');
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
@@ -24,8 +32,8 @@ class WebSocketService {
       this.openHandler?.();
     };
 
-    this.ws.onmessage = (event) => {
-      if (this.messageHandler) {
+    socket.onmessage = (event) => {
+      if (this.ws === socket && this.messageHandler) {
         try {
           const data = JSON.parse(event.data);
           this.messageHandler(data);
@@ -35,14 +43,17 @@ class WebSocketService {
       }
     };
 
-    this.ws.onerror = (error) => {
+    socket.onerror = (error) => {
       console.error('WebSocket error:', error);
     };
 
-    this.ws.onclose = () => {
+    socket.onclose = () => {
       console.log('WebSocket disconnected');
-      this.closeHandler?.();
-      this.scheduleReconnect(url);
+      if (this.ws === socket) this.ws = null;
+      if (this.shouldReconnect && this.currentUrl === url) {
+        this.closeHandler?.();
+        this.scheduleReconnect(url);
+      }
     };
   }
 
@@ -70,14 +81,17 @@ class WebSocketService {
   }
 
   disconnect() {
+    this.shouldReconnect = false;
+    this.currentUrl = null;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
 
     if (this.ws) {
-      this.ws.close();
+      const socket = this.ws;
       this.ws = null;
+      socket.close();
     }
   }
 }

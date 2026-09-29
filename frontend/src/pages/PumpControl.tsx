@@ -22,13 +22,8 @@ export default function PumpControl() {
     try {
       const result = await apiService.simulateVFD({ target_spm: targetSpm }, wellId);
       setVfdResult(result);
-      setCurrentSpm(targetSpm);
-      if (result?.vfd_result) {
-        setTelemetry({ ...telemetry,
-          spm:           result.vfd_result.current_spm       ?? targetSpm,
-          vfd_frequency: result.vfd_result.current_frequency ?? spmToHz(targetSpm),
-        });
-      }
+      setCurrentSpm(result.telemetry.spm);
+      setTelemetry(result.telemetry);
     } catch (err) {
       setError('Simulation failed — check backend connection.');
     } finally {
@@ -107,7 +102,7 @@ export default function PumpControl() {
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-muted">Status</span>
-                <span className="text-sm font-bold text-green">● CONNECTED</span>
+                <span className="text-sm font-bold text-cyan">● SIMULATION</span>
               </div>
               {[
                 { label: 'Current Frequency', value: `${displayCurrentHz.toFixed(1)}`, unit: 'Hz' },
@@ -157,8 +152,8 @@ export default function PumpControl() {
             <h3 className="text-sm font-bold text-stone-900 mb-3 uppercase tracking-wide">Asymmetric Pumping</h3>
             <div className="space-y-2.5">
               {[
-                { label: 'Downstroke Speed', value: 'SLOW' },
-                { label: 'Upstroke Speed',   value: 'FAST' },
+                { label: 'VFD response', value: 'Updated in model' },
+                { label: 'Field output', value: 'Not connected' },
               ].map(({ label, value }) => (
                 <div key={label} className="flex items-center justify-between">
                   <span className="text-xs text-muted">{label}</span>
@@ -166,8 +161,8 @@ export default function PumpControl() {
                 </div>
               ))}
               <div className="h-px bg-stone-100" />
-              <p className="text-xs text-muted">Slow downstroke → reduce fluid resistance / rod-float risk</p>
-              <p className="text-xs text-muted">Fast upstroke → improve fluid lifting efficiency</p>
+              <p className="text-xs text-muted">This demo updates simulated VFD frequency and well telemetry only.</p>
+              <p className="text-xs text-muted">It does not issue commands to physical pump equipment.</p>
             </div>
           </div>
 
@@ -178,8 +173,8 @@ export default function PumpControl() {
                 {[
                   { label: 'Applied SPM', value: `${(vfdResult.vfd_result?.current_spm ?? currentSpm).toFixed(1)}`     },
                   { label: 'Rod Load',    value: `${(vfdResult.telemetry?.rod_load ?? 0).toFixed(1)} kN`               },
-                  { label: 'Vibration',   value: `${(vfdResult.telemetry?.vibration ?? 0).toFixed(2)} mm/s`            },
-                  { label: 'Power',       value: `${(vfdResult.telemetry?.power_consumption ?? 0).toFixed(1)} kW`      },
+                  { label: 'Vibration', value: `${vfdResult.telemetry.surface_vibration.toFixed(2)} mm/s` },
+                  { label: 'Power', value: `${vfdResult.telemetry.motor_load.toFixed(1)} kW` },
                 ].map(({ label, value }) => (
                   <div key={label} className="flex items-center justify-between">
                     <span className="text-xs text-muted">{label}</span>

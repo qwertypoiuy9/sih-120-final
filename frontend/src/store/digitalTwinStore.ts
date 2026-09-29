@@ -1,8 +1,9 @@
 import { create } from 'zustand';
-import { DigitalTwinState, Telemetry, ReservoirState, WellboreState, SRPState, DynamometerState, AIInsights, Alert, ScenarioType } from '../types';
+import { DigitalTwinState, Telemetry, CSSState, ReservoirState, WellboreState, SRPState, DynamometerState, AIInsights, Alert, ScenarioType } from '../types';
 
 interface DigitalTwinStore extends DigitalTwinState {
   setTelemetry: (telemetry: Telemetry) => void;
+  setCSS: (css: CSSState) => void;
   setReservoir: (reservoir: ReservoirState) => void;
   setWellbore: (wellbore: WellboreState) => void;
   setSRP: (srp: SRPState) => void;
@@ -11,6 +12,7 @@ interface DigitalTwinStore extends DigitalTwinState {
   setAlerts: (alerts: Alert[]) => void;
   setScenario: (scenario: ScenarioType) => void;
   setConnected: (connected: boolean) => void;
+  setStreaming: (streaming: boolean) => void;
   setLoading: (loading: boolean) => void;
   reset: () => void;
 }
@@ -39,6 +41,21 @@ const initialState: DigitalTwinState = {
     pump_efficiency: 0.85,
     production_rate: 15.0,
     energy_consumption: 45.0,
+    steam_injection_rate: 0,
+  },
+  css: {
+    cycle_number: 1,
+    phase: 'production',
+    days_in_phase: 0,
+    steam_injection_rate: 0,
+    injection_pressure: 8,
+    target_temperature: 180,
+    production_cutoff: 5,
+    steam_oil_ratio: 0,
+    cycle_production: 0,
+    status: 'production',
+    current_temperature: 55,
+    current_viscosity: 1000,
   },
   reservoir: {
     current_temperature: 55.0,
@@ -68,6 +85,7 @@ const initialState: DigitalTwinState = {
     downhole_pressure: 300.0,
     displacement: [],
     velocity: [],
+    stress: [],
     status: 'operating',
   },
   dynamometer: {
@@ -105,6 +123,7 @@ const initialState: DigitalTwinState = {
   alerts: [],
   currentScenario: 'normal',
   isConnected: false,
+  isStreaming: false,
   isLoading: true,
 };
 
@@ -112,6 +131,7 @@ export const useDigitalTwinStore = create<DigitalTwinStore>((set) => ({
   ...initialState,
 
   setTelemetry: (telemetry) => set({ telemetry }),
+  setCSS: (css) => set({ css }),
   setReservoir: (reservoir) => set({ reservoir }),
   setWellbore: (wellbore) => set({ wellbore }),
   setSRP: (srp) => set({ srp }),
@@ -120,6 +140,7 @@ export const useDigitalTwinStore = create<DigitalTwinStore>((set) => ({
   setAlerts: (alerts) => set({ alerts }),
   setScenario: (scenario) => set({ currentScenario: scenario }),
   setConnected: (connected) => set({ isConnected: connected }),
+  setStreaming: (streaming) => set({ isStreaming: streaming }),
   setLoading: (loading) => set({ isLoading: loading }),
   reset: () => set(initialState),
 }));

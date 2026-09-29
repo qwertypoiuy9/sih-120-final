@@ -1,10 +1,15 @@
 import { useDigitalTwinStore } from '../store/digitalTwinStore';
 import { useState } from 'react';
 import ReservoirVisualization from '../components/ReservoirVisualization';
+import { interpolateProfile } from '../profile';
 
 export default function Reservoir() {
-  const { reservoir, telemetry } = useDigitalTwinStore();
+  const { reservoir, wellbore } = useDigitalTwinStore();
   const [selectedDepth, setSelectedDepth] = useState(1350);
+  const depth = Math.min(selectedDepth, wellbore.depth);
+  const temperatureAtDepth = interpolateProfile(wellbore.temperature_profile, depth, wellbore.depth);
+  const pressureAtDepth = interpolateProfile(wellbore.pressure_profile, depth, wellbore.depth);
+  const viscosityAtDepth = interpolateProfile(wellbore.viscosity_profile, depth, wellbore.depth);
 
   return (
     <div className="p-6 h-full">
@@ -69,18 +74,18 @@ export default function Reservoir() {
               <div className="flex items-center justify-between">
                 <span className="text-xs text-muted">Current Viscosity</span>
                 <span className="text-xs font-bold font-mono text-stone-900">
-                  {telemetry.temperature < 45 ? '2500' : telemetry.temperature < 50 ? '1500' : '800'} cP
+                  {viscosityAtDepth === null ? '—' : viscosityAtDepth.toFixed(0)} cP
                 </span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-xs text-muted">Mobility</span>
                 <span className="text-xs font-bold font-mono text-stone-900">
-                  {telemetry.temperature < 45 ? '0.2' : telemetry.temperature < 50 ? '0.33' : '0.63'} mD/cP
+                  {viscosityAtDepth === null || viscosityAtDepth <= 0 ? '—' : (1 / viscosityAtDepth).toExponential(2)} 1/cP
                 </span>
               </div>
               <div className="h-px bg-stone-100" />
-              <p className="text-xs text-muted">Digital Twin Demonstration Model</p>
-              <p className="text-xs text-muted">Demo / Calibration Required</p>
+              <p className="text-xs text-muted">Inverse-viscosity index only; permeability is not modeled.</p>
+              <p className="text-xs text-muted">{wellbore.model_type}</p>
             </div>
           </div>
 
@@ -91,23 +96,23 @@ export default function Reservoir() {
               <div>
                 <label className="text-xs text-muted mb-2 block">Depth (m)</label>
                 <input
-                  type="range" min="0" max="2000"
+                  type="range" min="0" max={wellbore.depth}
                   value={selectedDepth}
-                  onChange={(e) => setSelectedDepth(Number(e.target.value))}
+                  onChange={(e) => setSelectedDepth(Math.min(Number(e.target.value), wellbore.depth))}
                   className="w-full accent-[#8b5a2b]"
                 />
                 <div className="flex justify-between text-xs text-muted mt-1">
                   <span>0m</span>
                   <span className="font-bold font-mono text-cyan">{selectedDepth}m</span>
-                  <span>2000m</span>
+                  <span>{wellbore.depth.toFixed(0)}m</span>
                 </div>
               </div>
               <div className="h-px bg-stone-100" />
               <div className="space-y-2">
                 {[
-                  { label: 'Temperature', value: `${(reservoir.current_temperature - (selectedDepth / 2000) * 10).toFixed(1)}°C` },
-                  { label: 'Pressure',    value: `${(telemetry.pressure + (selectedDepth / 2000) * 200).toFixed(1)} kPa`         },
-                  { label: 'Viscosity',   value: `${selectedDepth > 1300 ? '1200' : '800'} cP`                                    },
+                  { label: 'Temperature', value: temperatureAtDepth === null ? '—' : `${temperatureAtDepth.toFixed(1)} °C` },
+                  { label: 'Pressure', value: pressureAtDepth === null ? '—' : `${pressureAtDepth.toFixed(1)} kPa` },
+                  { label: 'Viscosity', value: viscosityAtDepth === null ? '—' : `${viscosityAtDepth.toFixed(0)} cP` },
                 ].map(({ label, value }) => (
                   <div key={label} className="flex items-center justify-between">
                     <span className="text-xs text-muted">{label}</span>

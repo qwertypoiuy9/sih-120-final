@@ -56,24 +56,25 @@ const SLOW_POLL_MS = 8000;
 function WellApp() {
   const { wellId = 'well-14' } = useParams<{ wellId: string }>();
   const location = useLocation();
+  const activeWellId = useRef(wellId);
+  activeWellId.current = wellId;
 
   const {
-    setTelemetry, setReservoir, setWellbore,
+    setTelemetry, setCSS, setReservoir, setWellbore,
     setSRP, setDynamometer, setAI, setAlerts,
-    setConnected, setLoading,
+    setConnected, setStreaming, setLoading,
   } = useDigitalTwinStore();
+  const isStreaming = useDigitalTwinStore((state) => state.isStreaming);
 
   // VITE_WS_URL is empty on Vercel (WS not supported through rewrites).
   // Locally it reads ws://localhost:8000/ws/digital-twin from .env.
-  // When undefined the WS connect fails immediately, setConnected(false)
-  // fires, and the app runs on REST polling alone — fully functional.
-  const wsUrlRef = useRef(
-    import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws/digital-twin',
-  );
+  // When undefined the app uses REST telemetry polling instead.
+  const wsUrlRef = useRef<string | null>(import.meta.env.VITE_WS_URL || null);
 
   const loadSlowData = async () => {
     try {
-      const [reservoir, wellbore, srp, dynamometer, ai, alerts] = await Promise.all([
+      const [css, reservoir, wellbore, srp, dynamometer, ai, alerts] = await Promise.all([
+        apiService.getCSSState(wellId),
         apiService.getReservoirState(wellId),
         apiService.getWellboreState(wellId),
         apiService.getSRPState(wellId),
@@ -81,6 +82,8 @@ function WellApp() {
         apiService.getAIInsights(wellId),
         apiService.getAlerts(wellId),
       ]);
+      if (activeWellId.current !== wellId) return;
+      setCSS(css);
       setReservoir(reservoir);
       setWellbore(wellbore);
       setSRP(srp);
@@ -93,12 +96,15 @@ function WellApp() {
   };
 
   useEffect(() => {
+    setConnected(false);
+    setStreaming(false);
     const loadInitial = async () => {
       try {
         setLoading(true);
-        const [telemetry, reservoir, wellbore, srp, dynamometer, ai, alerts] =
+        const [telemetry, css, reservoir, wellbore, srp, dynamometer, ai, alerts] =
           await Promise.all([
             apiService.getTelemetry(wellId),
+            apiService.getCSSState(wellId),
             apiService.getReservoirState(wellId),
             apiService.getWellboreState(wellId),
             apiService.getSRPState(wellId),
@@ -106,36 +112,66 @@ function WellApp() {
             apiService.getAIInsights(wellId),
             apiService.getAlerts(wellId),
           ]);
+        if (activeWellId.current !== wellId) return;
         setTelemetry(telemetry);
+        setCSS(css);
         setReservoir(reservoir);
         setWellbore(wellbore);
         setSRP(srp);
         setDynamometer(dynamometer);
         setAI(ai);
         setAlerts(alerts);
+        setConnected(true);
         setLoading(false);
       } catch (error) {
         console.error('Error loading initial data:', error);
+        setConnected(false);
         setLoading(false);
       }
     };
 
     loadInitial();
 
-    const wsUrl = wsUrlRef.current;
-    websocketService.connect(wsUrl);
-    websocketService.onOpen(()  => setConnected(true));
-    websocketService.onClose(() => setConnected(false));
-    websocketService.onMessage((data) => setTelemetry(data));
+    if (wsUrlRef.current) {
+      const wsUrl = `${wsUrlRef.current.replace(/\/$/, '')}/${encodeURIComponent(wellId)}`;
+      websocketService.onOpen(() => {
+        setStreaming(true);
+        setConnected(true);
+      });
+      websocketService.onClose(() => setStreaming(false));
+      websocketService.onMessage((data) => setTelemetry(data));
+      websocketService.connect(wsUrl);
+    }
 
     const slowPollId = setInterval(loadSlowData, SLOW_POLL_MS);
 
     return () => {
       websocketService.disconnect();
+      setConnected(false);
+      setStreaming(false);
       clearInterval(slowPollId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wellId]);   // re-run if the wellId in the URL changes
+
+  useEffect(() => {
+    if (isStreaming) return undefined;
+    const pollTelemetry = async () => {
+      try {
+        const telemetry = await apiService.getTelemetry(wellId);
+        if (activeWellId.current === wellId) {
+          setTelemetry(telemetry);
+          setConnected(true);
+        }
+      } catch (error) {
+        console.error('Telemetry polling failed:', error);
+        if (activeWellId.current === wellId) setConnected(false);
+      }
+    };
+    void pollTelemetry();
+    const intervalId = setInterval(() => void pollTelemetry(), 2000);
+    return () => clearInterval(intervalId);
+  }, [isStreaming, wellId, setTelemetry, setConnected]);
 
   // Build sub-path relative to /well/:wellId
   const isLoginPage = location.pathname === '/login';

@@ -12,10 +12,11 @@ Physics chain (called every update_state()):
   7. Darcy flow rate    → Q = k*A*ΔP / (μ*L)   (steady-state Darcy's law)
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List
 import asyncio
+import copy
 from datetime import datetime
 import math
 
@@ -118,6 +119,189 @@ def _var(data) -> float:
     return sum((x - m) ** 2 for x in lst) / len(lst)
 
 
+def _surface_rod_load(dt, dynamometer_state=None) -> float:
+    """Estimate polished-rod load from the generated upstroke dynamometer card."""
+    state = dynamometer_state or dt.dynamometer_state
+    load = state.get("load", [])
+    if load:
+        return _mean(load[:max(1, len(load) // 2)])
+    return _mean(dt.rod_dynamics_state.get("load_profile", []))
+
+
+def _telemetry_payload(dt: "DigitalTwinState") -> Dict:
+    pressure = _mean(dt.wellbore_state['pressure_profile'])
+    steam_inj = 100.0 * max(0.0, 1.0 - dt.css_day / 5.0) if dt.css_day < 5.0 else 0.0
+    return {
+        "timestamp": dt.timestamp.isoformat(),
+        "temperature": round(dt.thermal_state['current_temperature'], 2),
+        "pressure": round(pressure, 2),
+        "flow_rate": round(dt.flow_rate, 2),
+        "spm": round(dt.current_spm, 2),
+        "rod_load": round(_surface_rod_load(dt), 2),
+        "surface_vibration": round(dt.surface_state['surface_vibration'], 3),
+        "motor_load": round(dt.surface_state['power_consumption'], 2),
+        "vfd_frequency": round(dt.surface_state['vfd_frequency'], 2),
+        "pump_efficiency": round(dt.surface_state['pump_efficiency'], 3),
+        "production_rate": round(dt.flow_rate, 2),
+        "energy_consumption": round(dt.surface_state['power_consumption'], 2),
+        "steam_injection_rate": round(steam_inj, 2),
+    }
+
+
+def _ai_insights_payload(dt: "DigitalTwinState") -> Dict:
+    temperature = dt.thermal_state['current_temperature']
+    viscosity = dt.viscosity_state['current_viscosity']
+    classification = dt.dynamometer_state['classification']
+    rod_float = classification['rod_float_probability']
+    impact_risk = classification['impact_loading_risk']
+    current_spm = dt.current_spm
+    recommended_spm = current_spm
+    reasoning = []
+
+    if temperature < 45.0:
+        recommended_spm = min(recommended_spm, 3.0)
+        reasoning.append(f"Reservoir is near baseline at {temperature:.1f}°C; lower pump speed and review the next steam cycle.")
+    elif temperature < 50.0:
+        recommended_spm = min(recommended_spm, 4.0)
+        reasoning.append(f"Reservoir is cooling at {temperature:.1f}°C; monitor viscosity and production.")
+
+    if viscosity > 2000.0:
+        recommended_spm = min(recommended_spm, 3.0)
+        reasoning.append(f"Estimated viscosity is elevated at {viscosity:.0f} cP.")
+    elif viscosity > 1000.0:
+        recommended_spm = min(recommended_spm, 4.0)
+        reasoning.append(f"Estimated viscosity is {viscosity:.0f} cP; monitor pump loading.")
+
+    if rod_float >= 0.7:
+        recommended_spm = min(recommended_spm, max(1.0, current_spm - 1.5))
+        reasoning.append(f"Dynamometer card indicates high rod-float risk ({rod_float * 100:.0f}%).")
+    elif rod_float >= 0.4:
+        recommended_spm = min(recommended_spm, max(1.0, current_spm - 0.5))
+        reasoning.append(f"Dynamometer card indicates elevated rod-float risk ({rod_float * 100:.0f}%).")
+
+    if impact_risk >= 0.7:
+        recommended_spm = min(recommended_spm, max(1.0, current_spm - 1.0))
+        reasoning.append(f"Dynamometer card indicates high impact-loading risk ({impact_risk * 100:.0f}%).")
+    elif impact_risk >= 0.4:
+        recommended_spm = min(recommended_spm, max(1.0, current_spm - 0.5))
+        reasoning.append(f"Dynamometer card indicates elevated impact-loading risk ({impact_risk * 100:.0f}%).")
+
+    if not reasoning:
+        reasoning.append("Temperature, viscosity, and simulated dynamometer-card indicators are within the configured demo thresholds.")
+
+    if rod_float >= 0.7 or impact_risk >= 0.7:
+        condition = "mechanical_risk"
+    elif temperature < 50.0 or viscosity > 1000.0:
+        condition = "increasing_viscosity"
+    else:
+        condition = "normal"
+
+    highest_risk = max(rod_float, impact_risk)
+    failure_risk = "high" if highest_risk >= 0.7 else "moderate" if highest_risk >= 0.4 else "low"
+    return {
+        "condition": condition,
+        "rod_float_probability": rod_float,
+        "impact_loading_risk": impact_risk,
+        "recommended_spm": round(recommended_spm, 1),
+        "recommended_vfd_frequency": round(dt.surface_model.calculate_frequency_from_spm(recommended_spm), 1),
+        "confidence": classification['confidence'],
+        "model_type": "RULE-BASED PHYSICS + DYNAMOMETER CLASSIFIER (DEMO)",
+        "reasoning": reasoning,
+        "physics_evidence": {
+            "temperature": round(temperature, 2),
+            "viscosity": round(viscosity, 1),
+            "fluid_resistance": round(viscosity / 1000.0, 3),
+            "rod_dynamics": classification['mechanical_stress'].lower(),
+            "rod_float": rod_float,
+            "impact_load": impact_risk,
+            "failure_risk": failure_risk,
+        },
+    }
+
+
+def _simulate_css_cycle(dt: "DigitalTwinState", parameters: Dict) -> Dict:
+    """Run a CSS what-if on a private model copy; never mutate the live well."""
+    candidate = copy.deepcopy(dt)
+    steam_volume = float(parameters['steam_volume'])
+    injection_rate = float(parameters['steam_injection_rate'])
+    injection_pressure = float(parameters['injection_pressure'])
+    target_temperature = float(parameters['target_temperature'])
+    injection_duration = float(parameters['injection_duration'])
+    soak_duration = float(parameters['soak_duration'])
+    production_duration = float(parameters['production_duration'])
+
+    candidate.thermal_model.simulate_injection(
+        injection_duration,
+        injection_rate,
+        target_temperature,
+    )
+    candidate.thermal_model.simulate_soak(soak_duration)
+    candidate.update_state(dt_seconds=0.0)
+    production_rate = candidate.flow_rate
+    cycle_production = production_rate * production_duration
+    candidate.thermal_model.simulate_production(production_duration, production_rate)
+    candidate.update_state(dt_seconds=0.0)
+
+    barrels = max(cycle_production * 6.28981, 1e-6)
+    energy_per_barrel = (
+        candidate.surface_state['power_consumption']
+        * production_duration * 24.0 * 0.0036 / barrels
+    )
+    return {
+        "parameters": {
+            "steam_volume": steam_volume,
+            "steam_injection_rate": injection_rate,
+            "injection_pressure": injection_pressure,
+            "target_temperature": target_temperature,
+            "injection_duration": injection_duration,
+            "soak_duration": soak_duration,
+            "production_duration": production_duration,
+        },
+        "steam_oil_ratio": round(steam_volume / max(cycle_production, 1e-6), 3),
+        "cycle_production": round(cycle_production, 2),
+        "energy_per_barrel": round(energy_per_barrel, 4),
+        "production_rate": round(production_rate, 2),
+        "ending_temperature": round(candidate.thermal_model.current_temperature, 2),
+        "ending_viscosity": round(
+            candidate.viscosity_model.calculate_viscosity(candidate.thermal_model.current_temperature),
+            2,
+        ),
+    }
+
+
+def _validated_css_parameters(parameters: Dict) -> Dict:
+    limits = {
+        "steam_volume": (1.0, 5000.0),
+        "steam_injection_rate": (1.0, 1000.0),
+        "injection_pressure": (0.1, 30.0),
+        "target_temperature": (45.0, 225.0),
+        "injection_duration": (0.1, 30.0),
+        "soak_duration": (0.0, 30.0),
+        "production_duration": (0.1, 365.0),
+    }
+    validated = {}
+    for name, (minimum, maximum) in limits.items():
+        try:
+            value = float(parameters.get(name))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"{name} must be a number")
+        if not math.isfinite(value) or not minimum <= value <= maximum:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{name} must be between {minimum} and {maximum}",
+            )
+        validated[name] = value
+    expected_steam_volume = validated["steam_injection_rate"] * validated["injection_duration"]
+    if not math.isclose(
+        validated["steam_volume"], expected_steam_volume, rel_tol=0.01, abs_tol=0.01
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="steam_volume must match steam_injection_rate × injection_duration",
+        )
+    return validated
+
+
 # ---------------------------------------------------------------------------
 # DigitalTwinState
 # ---------------------------------------------------------------------------
@@ -208,7 +392,7 @@ class DigitalTwinState:
         self.current_spm      = 5.0
         self.current_scenario = "normal"
         self.sim_time         = 0.0        # continuous simulation clock (seconds)
-        self.css_day          = 0.0        # days since last steam injection
+        self.css_day          = 20.0       # days since last steam injection
         self.timestamp        = datetime.utcnow()
 
         # Cached sub-states (populated by update_state)
@@ -277,11 +461,11 @@ class DigitalTwinState:
         dt_days = dt_seconds / 86400.0
         self.css_day += dt_days
 
-        T_res    = self.thermal_model.reservoir_temperature    # 45 °C
-        T_0      = self.thermal_model.steam_temperature * 0.9  # peak after injection
-        lam      = self.thermal_model.thermal_decline_rate     # 0.1 /day
+        T_res = self.thermal_model.reservoir_temperature
+        lam = self.thermal_model.thermal_decline_rate
+        T_current = self.thermal_model.current_temperature
 
-        T_new = T_res + (T_0 - T_res) * math.exp(-lam * self.css_day)
+        T_new = T_res + (T_current - T_res) * math.exp(-lam * dt_days)
         self.thermal_model.current_temperature = max(T_res, T_new)
         self.thermal_model.time_since_injection = self.css_day
 
@@ -339,7 +523,10 @@ class DigitalTwinState:
         )
 
         # 6. Surface model
-        mean_rod_load   = _mean(rod_dynamics_state['load_profile'])
+        self.surface_model.current_spm = self.current_spm
+        self.surface_model.current_frequency = \
+            self.surface_model.calculate_frequency_from_spm(self.current_spm)
+        mean_rod_load   = _surface_rod_load(self, dynamometer_state)
         load_variance   = _var(dynamometer_state['load'])
         rod_float_prob  = dynamometer_state['classification']['rod_float_probability']
         surface_state   = self.surface_model.get_surface_state(
@@ -348,10 +535,6 @@ class DigitalTwinState:
             load_variance,
             rod_float_prob,
         )
-        # Keep SurfaceModel's SPM in sync
-        self.surface_model.current_spm = self.current_spm
-        self.surface_model.current_frequency = \
-            self.surface_model.calculate_frequency_from_spm(self.current_spm)
 
         # 7. Darcy flow rate (uses freshly computed pressure profile)
         self.flow_rate = self._calculate_darcy_flow_rate(T_current)
@@ -436,47 +619,26 @@ async def get_well():
 
 @app.get("/api/telemetry")
 async def get_telemetry():
-    digital_twin.update_state()
-    pressure  = _mean(digital_twin.wellbore_state['pressure_profile'])
-    rod_load  = _mean(digital_twin.rod_dynamics_state['load_profile'])
-    steam_inj = 100.0 * max(0.0, 1.0 - digital_twin.css_day / 5.0) if digital_twin.css_day < 5.0 else 0.0
-
-    return {
-        "timestamp":          digital_twin.timestamp.isoformat(),
-        "temperature":        round(digital_twin.thermal_state['current_temperature'], 2),
-        "pressure":           round(pressure, 2),
-        "flow_rate":          round(digital_twin.flow_rate, 2),
-        "spm":                round(digital_twin.current_spm, 2),
-        "rod_load":           round(rod_load, 2),
-        "surface_vibration":  round(digital_twin.surface_state['surface_vibration'], 3),
-        "motor_load":         round(digital_twin.surface_state['power_consumption'], 2),
-        "vfd_frequency":      round(digital_twin.surface_state['vfd_frequency'], 2),
-        "pump_efficiency":    round(digital_twin.surface_state['pump_efficiency'], 3),
-        "production_rate":    round(digital_twin.flow_rate, 2),
-        "energy_consumption": round(digital_twin.surface_state['power_consumption'], 2),
-        "steam_injection_rate": round(steam_inj, 2),
-    }
+    digital_twin.update_state(dt_seconds=2.0)
+    return _telemetry_payload(digital_twin)
 
 
 @app.get("/api/reservoir/state")
 async def get_reservoir_state():
-    digital_twin.update_state()
     return digital_twin.thermal_state
 
 
 @app.get("/api/wellbore/state")
 async def get_wellbore_state():
-    digital_twin.update_state()
     return digital_twin.wellbore_state
 
 
 @app.get("/api/srp/state")
 async def get_srp_state():
-    digital_twin.update_state()
     return {
         "spm":               round(digital_twin.current_spm, 2),
         "stroke_length":     2.5,
-        "rod_load":          round(_mean(digital_twin.rod_dynamics_state['load_profile']), 2),
+        "rod_load":          round(_surface_rod_load(digital_twin), 2),
         "surface_vibration": round(digital_twin.surface_state['surface_vibration'], 3),
         "pump_efficiency":   round(digital_twin.surface_state['pump_efficiency'], 3),
         "downhole_pressure": round(_mean(digital_twin.wellbore_state['pressure_profile']), 2),
@@ -488,7 +650,6 @@ async def get_srp_state():
 
 @app.get("/api/css/state")
 async def get_css_state():
-    digital_twin.update_state()
     day = digital_twin.css_day
 
     # Determine CSS phase from elapsed days
@@ -529,62 +690,7 @@ async def get_css_state():
 
 @app.get("/api/ai/insights")
 async def get_ai_insights():
-    digital_twin.update_state()
-
-    temp         = digital_twin.thermal_state['current_temperature']
-    viscosity    = digital_twin.viscosity_state['current_viscosity']
-    rod_float    = digital_twin.dynamometer_state['classification']['rod_float_probability']
-    impact_risk  = digital_twin.dynamometer_state['classification']['impact_loading_risk']
-
-    condition        = "normal"
-    recommended_spm  = digital_twin.current_spm
-    reasoning        = []
-
-    if temp < 45.0:
-        condition = "increasing_viscosity"
-        reasoning.append(f"Reservoir temperature at {temp:.1f}°C — below minimum for efficient production")
-        reasoning.append(f"Viscosity estimated at {viscosity:.0f} cP — schedule next CSS cycle")
-        recommended_spm = 3.0
-    elif temp < 50.0:
-        reasoning.append(f"Reservoir cooling detected ({temp:.1f}°C) — monitor viscosity trend")
-        recommended_spm = 4.0
-
-    if rod_float > 0.5:
-        condition = "rod_float_risk"
-        reasoning.append(f"Rod float probability {rod_float*100:.0f}% — downstroke fluid load insufficient")
-        recommended_spm = min(recommended_spm, 3.0)
-
-    if impact_risk > 0.5:
-        condition = "impact_loading_risk"
-        reasoning.append(f"Impact loading risk {impact_risk*100:.0f}% — possible gas void in pump barrel")
-        recommended_spm = min(recommended_spm, 3.5)
-
-    if viscosity > 2000.0:
-        reasoning.append(f"High viscosity ({viscosity:.0f} cP) — consider reducing SPM to {recommended_spm:.1f}")
-
-    if not reasoning:
-        reasoning.append(f"Operating within normal parameters at {temp:.1f}°C / {viscosity:.0f} cP")
-        reasoning.append(f"SPM {digital_twin.current_spm:.1f} is optimal for current conditions")
-
-    return {
-        "condition":              condition,
-        "rod_float_probability":  rod_float,
-        "impact_loading_risk":    impact_risk,
-        "recommended_spm":        round(recommended_spm, 1),
-        "recommended_vfd_frequency": round(
-            digital_twin.surface_model.calculate_frequency_from_spm(recommended_spm), 1),
-        "confidence":             0.85,
-        "reasoning":              reasoning,
-        "physics_evidence": {
-            "temperature":    round(temp, 2),
-            "viscosity":      round(viscosity, 1),
-            "fluid_resistance": round(viscosity / 1000.0, 3),
-            "rod_dynamics":   "elevated_stress" if rod_float > 0.3 else "normal",
-            "rod_float":      rod_float,
-            "impact_load":    impact_risk,
-            "failure_risk":   "high" if rod_float > 0.7 else ("moderate" if rod_float > 0.4 else "low"),
-        },
-    }
+    return _ai_insights_payload(digital_twin)
 
 
 @app.post("/api/simulation/run")
@@ -593,11 +699,9 @@ async def run_simulation(parameters: Dict):
     What-if simulation: capture baseline, apply new SPM, compute simulated state,
     calculate real improvement metrics, then restore original state.
     """
-    original_spm      = digital_twin.current_spm
-    original_scenario = digital_twin.current_scenario
-
-    # ── Baseline snapshot (current operating point) ──
-    baseline_rod_load  = round(_mean(digital_twin.rod_dynamics_state['load_profile']), 3)
+    working = copy.deepcopy(digital_twin)
+    original_spm = working.current_spm
+    baseline_rod_load  = round(_surface_rod_load(working), 3)
     baseline_vibration = round(digital_twin.surface_state['surface_vibration'], 3)
     baseline_rod_float = digital_twin.dynamometer_state['classification']['rod_float_probability']
     baseline_impact    = digital_twin.dynamometer_state['classification']['impact_loading_risk']
@@ -605,31 +709,19 @@ async def run_simulation(parameters: Dict):
     baseline_flow      = round(digital_twin.flow_rate, 2)
 
     # ── Apply new SPM and re-run physics ──
-    if 'spm' in parameters:
-        digital_twin.current_spm = float(parameters['spm'])
-        digital_twin.surface_model.current_spm = digital_twin.current_spm
-        digital_twin.surface_model.current_frequency = \
-            digital_twin.surface_model.calculate_frequency_from_spm(digital_twin.current_spm)
-
-    # Run several steps to let the wave equation settle at the new SPM
+    candidate_spm = max(1.0, min(8.0, float(parameters.get('spm', original_spm))))
+    working.current_spm = candidate_spm
+    working.surface_model.current_spm = candidate_spm
+    working.surface_model.current_frequency = working.surface_model.calculate_frequency_from_spm(candidate_spm)
     for _ in range(5):
-        digital_twin.update_state(dt_seconds=0.5)
+        working.update_state(dt_seconds=0.5)
 
-    sim_rod_load  = round(_mean(digital_twin.rod_dynamics_state['load_profile']), 3)
-    sim_vibration = round(digital_twin.surface_state['surface_vibration'], 3)
-    sim_rod_float = digital_twin.dynamometer_state['classification']['rod_float_probability']
-    sim_impact    = digital_twin.dynamometer_state['classification']['impact_loading_risk']
-    sim_energy    = round(digital_twin.surface_state['power_consumption'], 3)
-    sim_flow      = round(digital_twin.flow_rate, 2)
-
-    # ── Restore original state ──
-    digital_twin.current_spm      = original_spm
-    digital_twin.current_scenario = original_scenario
-    digital_twin.surface_model.current_spm = original_spm
-    digital_twin.surface_model.current_frequency = \
-        digital_twin.surface_model.calculate_frequency_from_spm(original_spm)
-    for _ in range(5):
-        digital_twin.update_state(dt_seconds=0.5)
+    sim_rod_load  = round(_surface_rod_load(working), 3)
+    sim_vibration = round(working.surface_state['surface_vibration'], 3)
+    sim_rod_float = working.dynamometer_state['classification']['rod_float_probability']
+    sim_impact    = working.dynamometer_state['classification']['impact_loading_risk']
+    sim_energy    = round(working.surface_state['power_consumption'], 3)
+    sim_flow      = round(working.flow_rate, 2)
 
     return {
         "baseline": {
@@ -642,7 +734,7 @@ async def run_simulation(parameters: Dict):
             "flow_rate":        baseline_flow,
         },
         "simulated": {
-            "spm":              round(parameters.get('spm', original_spm), 2),
+            "spm":              round(candidate_spm, 2),
             "rod_load":         sim_rod_load,
             "vibration":        sim_vibration,
             "rod_float_risk":   round(sim_rod_float, 3),
@@ -673,34 +765,26 @@ async def run_optimization(parameters: Dict):
     })
 
     original_spm = digital_twin.current_spm
+    baseline = copy.deepcopy(digital_twin)
     scenarios_spm = [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0]
     results = []
 
     for spm in scenarios_spm:
-        digital_twin.current_spm = spm
-        digital_twin.surface_model.current_spm = spm
-        digital_twin.surface_model.current_frequency = \
-            digital_twin.surface_model.calculate_frequency_from_spm(spm)
-        # Settle physics
+        candidate = copy.deepcopy(baseline)
+        candidate.current_spm = spm
+        candidate.surface_model.current_spm = spm
+        candidate.surface_model.current_frequency = candidate.surface_model.calculate_frequency_from_spm(spm)
         for _ in range(3):
-            digital_twin.update_state(dt_seconds=0.5)
+            candidate.update_state(dt_seconds=0.5)
 
         results.append({
             "spm":                spm,
-            "production":         round(digital_twin.flow_rate, 2),
-            "energy":             round(digital_twin.surface_state['power_consumption'], 2),
-            "rod_float_risk":     digital_twin.dynamometer_state['classification']['rod_float_probability'],
-            "impact_loading_risk":digital_twin.dynamometer_state['classification']['impact_loading_risk'],
-            "vibration":          round(digital_twin.surface_state['surface_vibration'], 3),
+            "production":         round(candidate.flow_rate, 2),
+            "energy":             round(candidate.surface_state['power_consumption'], 2),
+            "rod_float_risk":     candidate.dynamometer_state['classification']['rod_float_probability'],
+            "impact_loading_risk":candidate.dynamometer_state['classification']['impact_loading_risk'],
+            "vibration":          round(candidate.surface_state['surface_vibration'], 3),
         })
-
-    # Restore
-    digital_twin.current_spm = original_spm
-    digital_twin.surface_model.current_spm = original_spm
-    digital_twin.surface_model.current_frequency = \
-        digital_twin.surface_model.calculate_frequency_from_spm(original_spm)
-    for _ in range(3):
-        digital_twin.update_state(dt_seconds=0.5)
 
     # ── Multi-objective scoring (lower is better) ─────────────────────
     # Normalise each objective to [0, 1] then weight and sum
@@ -715,7 +799,7 @@ async def run_optimization(parameters: Dict):
         return prod_score * 0.4 + energy_score * 0.35 + risk_score * 0.25
 
     best_scenario = min(results, key=score)
-    current_state = results[2]  # SPM=4.0 as a representative "current" baseline
+    current_state = min(results, key=lambda result: abs(result["spm"] - original_spm))
 
     return {
         "current_state":   current_state,
@@ -724,7 +808,7 @@ async def run_optimization(parameters: Dict):
         "recommendation": {
             "spm": best_scenario['spm'],
             "vfd_frequency": round(
-                digital_twin.surface_model.calculate_frequency_from_spm(best_scenario['spm']), 1),
+                baseline.surface_model.calculate_frequency_from_spm(best_scenario['spm']), 1),
             "expected_improvement": {
                 "energy_savings": round(
                     (current_state['energy'] - best_scenario['energy'])
@@ -822,7 +906,6 @@ async def get_alerts():
 
 @app.get("/api/dynamometer")
 async def get_dynamometer():
-    digital_twin.update_state()
     return digital_twin.dynamometer_state
 
 
@@ -830,41 +913,33 @@ async def get_dynamometer():
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
 
-@app.websocket("/ws/digital-twin")
-async def websocket_endpoint(websocket: WebSocket):
+async def _stream_well_telemetry(websocket: WebSocket, dt: "DigitalTwinState"):
     await manager.connect(websocket)
     try:
         while True:
-            digital_twin.update_state(dt_seconds=2.0)
-
-            pressure  = _mean(digital_twin.wellbore_state['pressure_profile'])
-            rod_load  = _mean(digital_twin.rod_dynamics_state['load_profile'])
-            steam_inj = 100.0 * max(0.0, 1.0 - digital_twin.css_day / 5.0) \
-                        if digital_twin.css_day < 5.0 else 0.0
-
-            payload = {
-                "timestamp":          digital_twin.timestamp.isoformat(),
-                "temperature":        round(digital_twin.thermal_state['current_temperature'], 2),
-                "pressure":           round(pressure, 2),
-                "flow_rate":          round(digital_twin.flow_rate, 2),
-                "spm":                round(digital_twin.current_spm, 2),
-                "rod_load":           round(rod_load, 2),
-                "surface_vibration":  round(digital_twin.surface_state['surface_vibration'], 3),
-                "motor_load":         round(digital_twin.surface_state['power_consumption'], 2),
-                "vfd_frequency":      round(digital_twin.surface_state['vfd_frequency'], 2),
-                "pump_efficiency":    round(digital_twin.surface_state['pump_efficiency'], 3),
-                "production_rate":    round(digital_twin.flow_rate, 2),
-                "energy_consumption": round(digital_twin.surface_state['power_consumption'], 2),
-                "steam_injection_rate": round(steam_inj, 2),
-            }
-
-            await websocket.send_json(payload)
+            dt.update_state(dt_seconds=2.0)
+            await websocket.send_json(_telemetry_payload(dt))
             await asyncio.sleep(2)
-
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-    except Exception as e:
+    except Exception:
         manager.disconnect(websocket)
+        raise
+
+
+@app.websocket("/ws/digital-twin")
+async def websocket_endpoint(websocket: WebSocket):
+    await _stream_well_telemetry(websocket, digital_twin)
+
+
+@app.websocket("/ws/digital-twin/{well_id}")
+async def well_websocket_endpoint(websocket: WebSocket, well_id: str):
+    try:
+        dt = _get_well(well_id)
+    except HTTPException:
+        await websocket.close(code=1008, reason=f"Unknown well: {well_id}")
+        return
+    await _stream_well_telemetry(websocket, dt)
 
 
 # ===========================================================================
@@ -1029,27 +1104,6 @@ async def get_fleet_wells():
 # ---------------------------------------------------------------------------
 # Helper to build all well-scoped responses (reuses logic from existing fns)
 # ---------------------------------------------------------------------------
-def _telemetry_payload(dt: "DigitalTwinState") -> Dict:
-    pressure  = _mean(dt.wellbore_state['pressure_profile'])
-    rod_load  = _mean(dt.rod_dynamics_state['load_profile'])
-    steam_inj = 100.0 * max(0.0, 1.0 - dt.css_day / 5.0) if dt.css_day < 5.0 else 0.0
-    return {
-        "timestamp":          dt.timestamp.isoformat(),
-        "temperature":        round(dt.thermal_state['current_temperature'], 2),
-        "pressure":           round(pressure, 2),
-        "flow_rate":          round(dt.flow_rate, 2),
-        "spm":                round(dt.current_spm, 2),
-        "rod_load":           round(rod_load, 2),
-        "surface_vibration":  round(dt.surface_state['surface_vibration'], 3),
-        "motor_load":         round(dt.surface_state['power_consumption'], 2),
-        "vfd_frequency":      round(dt.surface_state['vfd_frequency'], 2),
-        "pump_efficiency":    round(dt.surface_state['pump_efficiency'], 3),
-        "production_rate":    round(dt.flow_rate, 2),
-        "energy_consumption": round(dt.surface_state['power_consumption'], 2),
-        "steam_injection_rate": round(steam_inj, 2),
-    }
-
-
 # ---------------------------------------------------------------------------
 # Well-scoped endpoints: /api/{well_id}/<resource>
 # ---------------------------------------------------------------------------
@@ -1062,37 +1116,35 @@ async def wid_get_well(well_id: str):
 @app.get("/api/wells/{well_id}/telemetry")
 async def wid_get_telemetry(well_id: str):
     dt = _get_well(well_id)
-    dt.update_state()
+    dt.update_state(dt_seconds=2.0)
     return _telemetry_payload(dt)
 
 
 @app.get("/api/wells/{well_id}/reservoir/state")
 async def wid_get_reservoir(well_id: str):
     dt = _get_well(well_id)
-    dt.update_state()
     return dt.thermal_state
 
 
 @app.get("/api/wells/{well_id}/wellbore/state")
 async def wid_get_wellbore(well_id: str):
     dt = _get_well(well_id)
-    dt.update_state()
     return dt.wellbore_state
 
 
 @app.get("/api/wells/{well_id}/srp/state")
 async def wid_get_srp(well_id: str):
     dt = _get_well(well_id)
-    dt.update_state()
     return {
         "spm":               round(dt.current_spm, 2),
         "stroke_length":     2.5,
-        "rod_load":          round(_mean(dt.rod_dynamics_state['load_profile']), 2),
+        "rod_load":          round(_surface_rod_load(dt), 2),
         "surface_vibration": round(dt.surface_state['surface_vibration'], 3),
         "pump_efficiency":   round(dt.surface_state['pump_efficiency'], 3),
         "downhole_pressure": round(_mean(dt.wellbore_state['pressure_profile']), 2),
         "displacement":      dt.rod_dynamics_state['displacement_profile'],
         "velocity":          dt.rod_dynamics_state['velocity_profile'],
+        "stress":            dt.rod_dynamics_state['stress_profile'],
         "status":            "operating",
     }
 
@@ -1100,20 +1152,24 @@ async def wid_get_srp(well_id: str):
 @app.get("/api/wells/{well_id}/css/state")
 async def wid_get_css(well_id: str):
     dt = _get_well(well_id)
-    dt.update_state()
     day = dt.css_day
     if day < 5.0:
-        phase, inj_rate = "injection", 100.0 * (1.0 - day / 5.0)
+        phase, days_in_phase, inj_rate = "injection", day, 100.0 * (1.0 - day / 5.0)
     elif day < 10.0:
-        phase, inj_rate = "soak", 0.0
+        phase, days_in_phase, inj_rate = "soak", day - 5.0, 0.0
     else:
-        phase, inj_rate = "production", 0.0
+        phase, days_in_phase, inj_rate = "production", day - 10.0, 0.0
+    cycle_production = dt.flow_rate * max(0.0, days_in_phase) if phase == "production" else 0.0
+    steam_volume = 500.0
     return {
-        "cycle_number": 5, "phase": phase, "days_in_phase": round(day, 1),
+        "cycle_number": None, "phase": phase, "days_in_phase": round(days_in_phase, 1),
+        "steam_volume": steam_volume, "injection_duration": 5.0,
+        "soak_duration": 5.0, "production_duration": 30.0,
         "steam_injection_rate": round(inj_rate, 2),
         "injection_pressure": 8.0, "target_temperature": 180.0,
-        "production_cutoff": 5.0, "steam_oil_ratio": 3.5,
-        "cycle_production": round(dt.flow_rate * max(0.0, day - 10.0), 1),
+        "production_cutoff": 5.0,
+        "steam_oil_ratio": round(steam_volume / cycle_production, 3) if cycle_production > 0 else 0.0,
+        "cycle_production": round(cycle_production, 1),
         "status": phase,
         "current_temperature": round(dt.thermal_state['current_temperature'], 2),
         "current_viscosity":   round(dt.viscosity_state['current_viscosity'], 1),
@@ -1123,55 +1179,18 @@ async def wid_get_css(well_id: str):
 @app.get("/api/wells/{well_id}/ai/insights")
 async def wid_get_ai(well_id: str):
     dt = _get_well(well_id)
-    dt.update_state()
-    temp        = dt.thermal_state['current_temperature']
-    viscosity   = dt.viscosity_state['current_viscosity']
-    rod_float   = dt.dynamometer_state['classification']['rod_float_probability']
-    impact_risk = dt.dynamometer_state['classification']['impact_loading_risk']
-    condition   = "normal"; recommended_spm = dt.current_spm; reasoning = []
-    if temp < 45.0:
-        condition = "increasing_viscosity"
-        reasoning.append(f"Reservoir temperature at {temp:.1f}°C — schedule CSS cycle")
-        recommended_spm = 3.0
-    elif temp < 50.0:
-        reasoning.append(f"Reservoir cooling ({temp:.1f}°C) — monitor viscosity")
-        recommended_spm = 4.0
-    if rod_float > 0.5:
-        condition = "rod_float_risk"
-        reasoning.append(f"Rod float probability {rod_float*100:.0f}%")
-        recommended_spm = min(recommended_spm, 3.0)
-    if impact_risk > 0.5:
-        condition = "impact_loading_risk"
-        reasoning.append(f"Impact loading risk {impact_risk*100:.0f}%")
-        recommended_spm = min(recommended_spm, 3.5)
-    if not reasoning:
-        reasoning.append(f"Operating normally at {temp:.1f}°C / {viscosity:.0f} cP")
-    return {
-        "condition": condition, "rod_float_probability": rod_float,
-        "impact_loading_risk": impact_risk, "recommended_spm": round(recommended_spm, 1),
-        "recommended_vfd_frequency": round(dt.surface_model.calculate_frequency_from_spm(recommended_spm), 1),
-        "confidence": 0.85, "reasoning": reasoning,
-        "physics_evidence": {
-            "temperature": round(temp, 2), "viscosity": round(viscosity, 1),
-            "fluid_resistance": round(viscosity / 1000.0, 3),
-            "rod_dynamics": "elevated_stress" if rod_float > 0.3 else "normal",
-            "rod_float": rod_float, "impact_load": impact_risk,
-            "failure_risk": "high" if rod_float > 0.7 else ("moderate" if rod_float > 0.4 else "low"),
-        },
-    }
+    return _ai_insights_payload(dt)
 
 
 @app.get("/api/wells/{well_id}/dynamometer")
 async def wid_get_dynamometer(well_id: str):
     dt = _get_well(well_id)
-    dt.update_state()
     return dt.dynamometer_state
 
 
 @app.get("/api/wells/{well_id}/alerts")
 async def wid_get_alerts(well_id: str):
     dt = _get_well(well_id)
-    dt.update_state()
     alerts = []
     rod_float = dt.dynamometer_state['classification']['rod_float_probability']
     impact    = dt.dynamometer_state['classification']['impact_loading_risk']
@@ -1208,33 +1227,36 @@ async def wid_get_alerts(well_id: str):
 @app.post("/api/wells/{well_id}/simulation/run")
 async def wid_run_simulation(well_id: str, parameters: Dict):
     dt = _get_well(well_id)
-    orig_spm = dt.current_spm; orig_scenario = dt.current_scenario
-    b_load = round(_mean(dt.rod_dynamics_state['load_profile']), 3)
+    working = copy.deepcopy(dt)
+    orig_spm = working.current_spm
+    b_load = round(_surface_rod_load(working), 3)
     b_vib  = round(dt.surface_state['surface_vibration'], 3)
     b_rf   = dt.dynamometer_state['classification']['rod_float_probability']
     b_imp  = dt.dynamometer_state['classification']['impact_loading_risk']
     b_eng  = round(dt.surface_state['power_consumption'], 3)
     b_flow = round(dt.flow_rate, 2)
-    if 'spm' in parameters:
-        dt.current_spm = float(parameters['spm'])
-        dt.surface_model.current_spm = dt.current_spm
-        dt.surface_model.current_frequency = dt.surface_model.calculate_frequency_from_spm(dt.current_spm)
-    for _ in range(5): dt.update_state(dt_seconds=0.5)
-    s_load = round(_mean(dt.rod_dynamics_state['load_profile']), 3)
-    s_vib  = round(dt.surface_state['surface_vibration'], 3)
-    s_rf   = dt.dynamometer_state['classification']['rod_float_probability']
-    s_imp  = dt.dynamometer_state['classification']['impact_loading_risk']
-    s_eng  = round(dt.surface_state['power_consumption'], 3)
-    s_flow = round(dt.flow_rate, 2)
-    dt.current_spm = orig_spm; dt.current_scenario = orig_scenario
-    dt.surface_model.current_spm = orig_spm
-    dt.surface_model.current_frequency = dt.surface_model.calculate_frequency_from_spm(orig_spm)
-    for _ in range(5): dt.update_state(dt_seconds=0.5)
+    try:
+        simulated_spm = float(parameters.get('spm', orig_spm))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="spm must be a number")
+    if not math.isfinite(simulated_spm) or not 1.0 <= simulated_spm <= 8.0:
+        raise HTTPException(status_code=422, detail="spm must be between 1 and 8")
+    working.current_spm = simulated_spm
+    working.surface_model.current_spm = simulated_spm
+    working.surface_model.current_frequency = working.surface_model.calculate_frequency_from_spm(simulated_spm)
+    for _ in range(5):
+        working.update_state(dt_seconds=0.5)
+    s_load = round(_surface_rod_load(working), 3)
+    s_vib  = round(working.surface_state['surface_vibration'], 3)
+    s_rf   = working.dynamometer_state['classification']['rod_float_probability']
+    s_imp  = working.dynamometer_state['classification']['impact_loading_risk']
+    s_eng  = round(working.surface_state['power_consumption'], 3)
+    s_flow = round(working.flow_rate, 2)
     return {
         "baseline":    {"spm": round(orig_spm,2), "rod_load": b_load, "vibration": b_vib,
                          "rod_float_risk": round(b_rf,3), "impact_loading_risk": round(b_imp,3),
                          "energy": b_eng, "flow_rate": b_flow},
-        "simulated":   {"spm": round(parameters.get('spm', orig_spm),2), "rod_load": s_load,
+        "simulated":   {"spm": round(simulated_spm,2), "rod_load": s_load,
                          "vibration": s_vib, "rod_float_risk": round(s_rf,3),
                          "impact_loading_risk": round(s_imp,3), "energy": s_eng, "flow_rate": s_flow},
         "improvement": {"rod_load_reduction": round(b_load-s_load,3),
@@ -1250,21 +1272,20 @@ async def wid_run_optimization(well_id: str, parameters: Dict):
     dt = _get_well(well_id)
     objectives = parameters.get('objectives', {'maximize_production': True, 'minimize_energy': True, 'minimize_rod_float_risk': True})
     orig_spm = dt.current_spm
+    baseline = copy.deepcopy(dt)
     results = []
     for spm in [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0]:
-        dt.current_spm = spm
-        dt.surface_model.current_spm = spm
-        dt.surface_model.current_frequency = dt.surface_model.calculate_frequency_from_spm(spm)
-        for _ in range(3): dt.update_state(dt_seconds=0.5)
-        results.append({"spm": spm, "production": round(dt.flow_rate,2),
-                         "energy": round(dt.surface_state['power_consumption'],2),
-                         "rod_float_risk": dt.dynamometer_state['classification']['rod_float_probability'],
-                         "impact_loading_risk": dt.dynamometer_state['classification']['impact_loading_risk'],
-                         "vibration": round(dt.surface_state['surface_vibration'],3)})
-    dt.current_spm = orig_spm
-    dt.surface_model.current_spm = orig_spm
-    dt.surface_model.current_frequency = dt.surface_model.calculate_frequency_from_spm(orig_spm)
-    for _ in range(3): dt.update_state(dt_seconds=0.5)
+        candidate = copy.deepcopy(baseline)
+        candidate.current_spm = spm
+        candidate.surface_model.current_spm = spm
+        candidate.surface_model.current_frequency = candidate.surface_model.calculate_frequency_from_spm(spm)
+        for _ in range(3):
+            candidate.update_state(dt_seconds=0.5)
+        results.append({"spm": spm, "production": round(candidate.flow_rate,2),
+                         "energy": round(candidate.surface_state['power_consumption'],2),
+                         "rod_float_risk": candidate.dynamometer_state['classification']['rod_float_probability'],
+                         "impact_loading_risk": candidate.dynamometer_state['classification']['impact_loading_risk'],
+                         "vibration": round(candidate.surface_state['surface_vibration'],3)})
     max_prod = max(r['production'] for r in results) or 1.0
     max_eng  = max(r['energy'] for r in results) or 1.0
     max_risk = max(r['rod_float_risk'] for r in results) or 1.0
@@ -1273,26 +1294,87 @@ async def wid_run_optimization(well_id: str, parameters: Dict):
                ((r['energy']/max_eng)*0.35 if objectives.get('minimize_energy') else 0.0) + \
                ((r['rod_float_risk']/(max_risk+1e-9))*0.25 if objectives.get('minimize_rod_float_risk') else 0.0)
     best = min(results, key=score)
-    cur  = results[2]
+    cur  = min(results, key=lambda result: abs(result["spm"] - orig_spm))
     return {"current_state": cur, "optimized_state": best, "all_scenarios": results,
             "recommendation": {"spm": best['spm'],
-                                "vfd_frequency": round(dt.surface_model.calculate_frequency_from_spm(best['spm']),1),
+                                "vfd_frequency": round(baseline.surface_model.calculate_frequency_from_spm(best['spm']),1),
                                 "expected_improvement": {
                                     "energy_savings": round((cur['energy']-best['energy'])/(cur['energy']+1e-9)*100,1),
                                     "rod_float_risk_reduction": round((cur['rod_float_risk']-best['rod_float_risk'])*100,1),
                                     "production_change": round((best['production']-cur['production'])/(cur['production']+1e-9)*100,1)}}}
 
 
+@app.post("/api/wells/{well_id}/css/simulate")
+async def wid_simulate_css(well_id: str, parameters: Dict):
+    dt = _get_well(well_id)
+    request = _validated_css_parameters(parameters)
+    baseline_parameters = {
+        "steam_volume": 500.0,
+        "steam_injection_rate": 100.0,
+        "injection_pressure": 8.0,
+        "target_temperature": 180.0,
+        "injection_duration": 5.0,
+        "soak_duration": 5.0,
+        "production_duration": 30.0,
+    }
+    return {
+        "baseline": _simulate_css_cycle(dt, baseline_parameters),
+        "simulated": _simulate_css_cycle(dt, request),
+    }
+
+
+@app.post("/api/wells/{well_id}/css/optimize")
+async def wid_optimize_css(well_id: str, parameters: Dict):
+    dt = _get_well(well_id)
+    request = _validated_css_parameters(parameters)
+    candidates = []
+    for rate_factor in (0.8, 1.0, 1.2):
+        for duration_delta in (-1.0, 0.0, 1.0):
+            candidate_parameters = dict(request)
+            candidate_parameters["steam_injection_rate"] = min(
+                1000.0, request["steam_injection_rate"] * rate_factor
+            )
+            candidate_parameters["injection_duration"] = max(
+                0.1, min(30.0, request["injection_duration"] + duration_delta)
+            )
+            candidate_parameters["steam_volume"] = (
+                candidate_parameters["steam_injection_rate"]
+                * candidate_parameters["injection_duration"]
+            )
+            result = _simulate_css_cycle(dt, candidate_parameters)
+            candidates.append(result)
+
+    max_production = max(item["cycle_production"] for item in candidates) or 1.0
+    max_energy = max(item["energy_per_barrel"] for item in candidates) or 1.0
+    max_sor = max(item["steam_oil_ratio"] for item in candidates) or 1.0
+    optimized = min(
+        candidates,
+        key=lambda item: (
+            item["steam_oil_ratio"] / max_sor * 0.4
+            + item["energy_per_barrel"] / max_energy * 0.3
+            + (1.0 - item["cycle_production"] / max_production) * 0.3
+        ),
+    )
+    return {
+        "baseline": _simulate_css_cycle(dt, request),
+        "optimized": optimized,
+        "candidates": candidates,
+    }
+
+
 @app.post("/api/wells/{well_id}/vfd/simulate")
 async def wid_simulate_vfd(well_id: str, parameters: Dict):
     dt     = _get_well(well_id)
-    result = dt.surface_model.update_vfd(float(parameters.get('target_spm', 3.5)))
+    try:
+        target_spm = float(parameters.get('target_spm', 3.5))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="target_spm must be a number")
+    if not math.isfinite(target_spm) or not 1.0 <= target_spm <= 8.0:
+        raise HTTPException(status_code=422, detail="target_spm must be between 1 and 8")
+    result = dt.surface_model.update_vfd(target_spm)
     dt.current_spm = result['current_spm']
-    dt.update_state()
-    return {"vfd_result": result, "telemetry": {
-        "rod_load":          round(_mean(dt.rod_dynamics_state['load_profile']),2),
-        "vibration":         round(dt.surface_state['surface_vibration'],3),
-        "power_consumption": round(dt.surface_state['power_consumption'],2)}}
+    dt.update_state(dt_seconds=2.0)
+    return {"vfd_result": result, "telemetry": _telemetry_payload(dt)}
 
 
 @app.post("/api/wells/{well_id}/scenario")

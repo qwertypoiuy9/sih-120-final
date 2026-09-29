@@ -18,7 +18,7 @@ export default function AIInsights() {
     <div className="p-6 h-full">
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-stone-900 mb-1">AI Analysis & Recommendation</h2>
-        <p className="text-muted text-sm">Physics-informed artificial intelligence insights</p>
+        <p className="text-muted text-sm">Rule-based analysis of the simulated well state; not a trained PINN or field-control system.</p>
       </div>
 
       <div className="grid grid-cols-12 gap-6 h-[calc(100vh-150px)]">
@@ -121,8 +121,12 @@ export default function AIInsights() {
                       <CheckCircle className="w-4 h-4 text-green" />
                     </div>
                     <div>
-                      <p className="text-sm font-bold text-green">RECOMMENDATION: Reduce SPM to {ai.recommended_spm.toFixed(1)}</p>
-                      <p className="text-xs text-muted mt-0.5">Lower asymmetric pumping speed predicted to stabilize operation</p>
+                      <p className="text-sm font-bold text-green">
+                        RECOMMENDATION: {ai.recommended_spm < telemetry.spm ? 'Reduce' : ai.recommended_spm > telemetry.spm ? 'Increase' : 'Maintain'} SPM at {ai.recommended_spm.toFixed(1)}
+                      </p>
+                      <p className="text-xs text-muted mt-0.5">
+                        Suggested from current temperature, viscosity, and simulated dynamometer risk indicators. Review before applying.
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -137,15 +141,15 @@ export default function AIInsights() {
             <h3 className="text-sm font-bold text-stone-900 mb-3 uppercase tracking-wide">AI Model Information</h3>
             <div className="space-y-2.5">
               {[
-                { label: 'Model Type',  value: 'Physics-Informed' },
-                { label: 'Architecture', value: 'PINN'            },
-                { label: 'Data Loss',   value: '0.15'             },
-                { label: 'Physics Loss',value: '0.08'             },
-                { label: 'Total Loss',  value: '0.23'             },
+                { label: 'Model Type', value: ai.model_type || 'DEMO CLASSIFIER' },
+                { label: 'Method', value: 'Threshold rules + dynamometer classifier' },
+                { label: 'Confidence', value: `${(ai.confidence * 100).toFixed(0)}%` },
+                { label: 'Training Loss', value: 'Not available' },
+                { label: 'Data Source', value: 'Digital-twin simulation' },
               ].map(({ label, value }) => (
                 <div key={label} className="flex items-center justify-between">
                   <span className="text-xs text-muted">{label}</span>
-                  <span className="text-xs font-bold font-mono text-stone-900">{value}</span>
+                  <span className="max-w-[65%] text-right text-xs font-bold font-mono text-stone-900">{value}</span>
                 </div>
               ))}
             </div>

@@ -3,9 +3,10 @@ import { useNotificationStore } from '../store/notificationStore';
 import { useAuthStore } from '../store/authStore';
 import { useParams } from 'react-router-dom';
 import { useState } from 'react';
+import { apiService, CSSCycleParameters, CSSCycleResult } from '../services/api';
 import { Play, RotateCcw, Loader2, Sparkles } from 'lucide-react';
 
-const BASELINE = {
+const DEFAULT_PARAMETERS: CSSCycleParameters = {
   steam_volume:        500,
   steam_injection_rate:100,
   injection_pressure:  8,
@@ -13,74 +14,82 @@ const BASELINE = {
   injection_duration:  5,
   soak_duration:       5,
   production_duration: 30,
-  steam_oil_ratio:     3.5,
-  cycle_production:    150,
-  oil_recovery:        12.5,
-  energy_per_barrel:   2.1,
-};
-
-const OPTIMISED = {
-  steam_volume:         420,
-  steam_injection_rate:  85,
-  injection_pressure:    7.2,
-  target_temperature:   175,
-  injection_duration:    4,
-  soak_duration:         7,
-  production_duration:   35,
-  steam_oil_ratio:       2.8,
-  cycle_production:     165,
-  oil_recovery:         13.8,
-  energy_per_barrel:    1.76,
 };
 
 export default function CSSControl() {
-  const { telemetry } = useDigitalTwinStore();
+  const { telemetry, css } = useDigitalTwinStore();
   const addAlert = useNotificationStore((s) => s.addAlert);
   const user     = useAuthStore((s) => s.user);
   const params   = useParams<{ wellId?: string }>();
   const wellId   = params.wellId ?? user?.assignedWellId ?? 'well-14';
 
-  const [params_, setParams] = useState({ ...BASELINE });
-  const set = (key: keyof typeof BASELINE) =>
+  const [params_, setParams] = useState<CSSCycleParameters>({ ...DEFAULT_PARAMETERS });
+  const [result, setResult] = useState<{ baseline: CSSCycleResult; output: CSSCycleResult } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const set = (key: keyof CSSCycleParameters) =>
     (e: React.ChangeEvent<HTMLInputElement>) =>
-      setParams((p) => ({ ...p, [key]: Number(e.target.value) }));
-
-  const [perf, setPerf] = useState({
-    steam_oil_ratio:   BASELINE.steam_oil_ratio,
-    cycle_production:  BASELINE.cycle_production,
-    oil_recovery:      BASELINE.oil_recovery,
-    energy_per_barrel: BASELINE.energy_per_barrel,
-  });
+      setParams((previous) => {
+        const next = { ...previous, [key]: Number(e.target.value) };
+        if (key === 'steam_injection_rate' || key === 'injection_duration') {
+          next.steam_volume = next.steam_injection_rate * next.injection_duration;
+        }
+        return next;
+      });
 
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [optimized,    setOptimized]    = useState(false);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const phaseOrder = ['injection', 'soak', 'production'];
+  const phaseProgress = (phase: string, duration: number) => {
+    const currentIndex = phaseOrder.indexOf(css.phase);
+    const phaseIndex = phaseOrder.indexOf(phase);
+    if (phaseIndex < currentIndex) return 100;
+    if (phaseIndex > currentIndex || currentIndex < 0) return 0;
+    return Math.min(100, Math.max(0, css.days_in_phase / duration * 100));
+  };
 
-  const runOptimization = () => {
-    setIsOptimizing(true);
+  const runSimulation = async () => {
+    setIsSimulating(true);
+    setError(null);
     setOptimized(false);
-    setTimeout(() => {
-      setParams({ ...OPTIMISED });
-      setPerf({
-        steam_oil_ratio:   OPTIMISED.steam_oil_ratio,
-        cycle_production:  OPTIMISED.cycle_production,
-        oil_recovery:      OPTIMISED.oil_recovery,
-        energy_per_barrel: OPTIMISED.energy_per_barrel,
-      });
-      setIsOptimizing(false);
+    try {
+      const response = await apiService.simulateCSS(params_, wellId);
+      setResult({ baseline: response.baseline, output: response.simulated });
+    } catch (err) {
+      console.error('CSS simulation failed:', err);
+      setError('CSS simulation failed. Check the backend connection and parameter ranges.');
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
+  const runOptimization = async () => {
+    setIsOptimizing(true);
+    setError(null);
+    try {
+      const response = await apiService.optimizeCSS(params_, wellId);
+      setParams(response.optimized.parameters);
+      setResult({ baseline: response.baseline, output: response.optimized });
       setOptimized(true);
       addAlert({
         wellId, type: 'info',
-        message:   'CSS Cycle AI Optimization Complete. SOR improved by 20% (3.5 → 2.8). Cycle production increased to 165 m³.',
+        message: `CSS what-if optimization completed. Simulated production ${response.optimized.cycle_production.toFixed(1)} m³/cycle at SOR ${response.optimized.steam_oil_ratio.toFixed(2)}.`,
         parameter: 'css_optimization',
         timestamp: new Date().toISOString(),
       });
-    }, 1500);
+    } catch (err) {
+      console.error('CSS optimization failed:', err);
+      setError('CSS optimization failed. Check the backend connection and parameter ranges.');
+    } finally {
+      setIsOptimizing(false);
+    }
   };
 
   const resetToBaseline = () => {
-    setParams({ ...BASELINE });
-    setPerf({ steam_oil_ratio: BASELINE.steam_oil_ratio, cycle_production: BASELINE.cycle_production, oil_recovery: BASELINE.oil_recovery, energy_per_barrel: BASELINE.energy_per_barrel });
+    setParams({ ...DEFAULT_PARAMETERS });
     setOptimized(false);
+    setResult(null);
+    setError(null);
   };
 
   const inputCls = `w-full bg-white border border-stone-200 rounded-lg px-4 py-2
@@ -104,9 +113,9 @@ export default function CSSControl() {
             <h3 className="text-sm font-bold text-stone-900 mb-4 uppercase tracking-wide">Current Cycle Status</h3>
             <div className="grid grid-cols-3 gap-4 mb-5">
               {[
-                { label: 'INJECTION',  status: 'COMPLETE', statusColor: 'text-green',  note: 'Cycle 5'          },
-                { label: 'SOAK',       status: 'ACTIVE',   statusColor: 'text-amber',  note: 'Day 3 of 5'       },
-                { label: 'PRODUCTION', status: 'READY',    statusColor: 'text-cyan',   note: 'Scheduled: Day 6' },
+                { label: 'CURRENT PHASE', status: css.phase.toUpperCase(), statusColor: css.phase === 'injection' ? 'text-green' : css.phase === 'soak' ? 'text-amber' : 'text-cyan', note: css.cycle_number ? `Cycle ${css.cycle_number}` : 'Cycle history unavailable' },
+                { label: 'DAYS IN PHASE', status: css.days_in_phase.toFixed(1), statusColor: 'text-stone-900', note: 'Digital-twin simulation' },
+                { label: 'WELL STATUS', status: css.status.toUpperCase(), statusColor: 'text-cyan', note: 'Model state' },
               ].map(({ label, status, statusColor, note }) => (
                 <div key={label} className="bg-stone-50 border border-stone-200 rounded-xl p-4">
                   <div className="flex items-center justify-between mb-2">
@@ -123,14 +132,14 @@ export default function CSSControl() {
               <p className="text-xs text-muted font-medium mb-4 uppercase tracking-wide">Cycle Timeline</p>
               <div className="space-y-3">
                 {[
-                  { label: 'INJECTION',  fill: 'w-full', color: 'bg-green',  track: 'bg-green/20',  display: `${params_.injection_duration} days`  },
-                  { label: 'SOAK',       fill: 'w-3/5',  color: 'bg-amber',  track: 'bg-amber/20',  display: `3/${params_.soak_duration} days`     },
-                  { label: 'PRODUCTION', fill: 'w-0',    color: 'bg-cyan',   track: 'bg-cyan/20',   display: `${params_.production_duration} days` },
-                ].map(({ label, fill, color, track, display }) => (
+                  { label: 'INJECTION', phase: 'injection', duration: params_.injection_duration, color: 'bg-green', track: 'bg-green/20', display: `${params_.injection_duration} days (scenario)` },
+                  { label: 'SOAK', phase: 'soak', duration: params_.soak_duration, color: 'bg-amber', track: 'bg-amber/20', display: `${params_.soak_duration} days (scenario)` },
+                  { label: 'PRODUCTION', phase: 'production', duration: params_.production_duration, color: 'bg-cyan', track: 'bg-cyan/20', display: `${params_.production_duration} days (scenario)` },
+                ].map(({ label, phase, duration, color, track, display }) => (
                   <div key={label} className="flex items-center gap-3">
                     <div className="w-24 text-xs text-muted font-medium">{label}</div>
                     <div className={`flex-1 h-3 ${track} rounded-full relative overflow-hidden`}>
-                      <div className={`absolute inset-y-0 left-0 ${fill} ${color} rounded-full`} />
+                      <div className={`absolute inset-y-0 left-0 ${color} rounded-full`} style={{ width: `${phaseProgress(phase, duration)}%` }} />
                     </div>
                     <div className="w-20 text-xs font-mono font-semibold text-stone-700 text-right">{display}</div>
                   </div>
@@ -145,43 +154,52 @@ export default function CSSControl() {
               <h3 className="text-sm font-bold text-stone-900 uppercase tracking-wide">CSS Parameters</h3>
               {optimized && (
                 <span className="flex items-center gap-1.5 text-xs font-bold text-green bg-green/10 border border-green/30 rounded-full px-3 py-1">
-                  <Sparkles className="w-3 h-3" /> AI OPTIMIZED
+                  <Sparkles className="w-3 h-3" /> MODEL OPTIMIZED
                 </span>
               )}
             </div>
             <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs text-muted mb-1.5 block font-medium">Steam Volume (tons, derived)</label>
+                <input type="number" value={params_.steam_volume.toFixed(1)} readOnly className={inputCls} />
+              </div>
               {[
-                { label: 'Steam Volume (tons)',       key: 'steam_volume'         },
-                { label: 'Injection Rate (t/d)',      key: 'steam_injection_rate' },
-                { label: 'Injection Pressure (MPa)',  key: 'injection_pressure'   },
-                { label: 'Target Temperature (°C)',   key: 'target_temperature'   },
-                { label: 'Injection Duration (days)', key: 'injection_duration'   },
-                { label: 'Soak Duration (days)',      key: 'soak_duration'        },
+                { label: 'Injection Rate (t/d)', key: 'steam_injection_rate' },
+                { label: 'Injection Pressure (MPa)', key: 'injection_pressure' },
+                { label: 'Target Temperature (°C)', key: 'target_temperature' },
+                { label: 'Injection Duration (days)', key: 'injection_duration' },
+                { label: 'Soak Duration (days)', key: 'soak_duration' },
               ].map(({ label, key }) => (
                 <div key={key}>
                   <label className="text-xs text-muted mb-1.5 block font-medium">{label}</label>
-                  <input type="number" value={params_[key as keyof typeof BASELINE]}
-                    onChange={set(key as keyof typeof BASELINE)} className={inputCls} />
+                  <input type="number" step="any" value={params_[key as keyof CSSCycleParameters]}
+                    onChange={set(key as keyof CSSCycleParameters)} className={inputCls} />
                 </div>
               ))}
               <div className="col-span-2">
                 <label className="text-xs text-muted mb-1.5 block font-medium">Production Duration (days)</label>
-                <input type="number" value={params_.production_duration}
+                <input type="number" step="any" value={params_.production_duration}
                   onChange={set('production_duration')} className={inputCls} />
               </div>
             </div>
             <div className="flex gap-3 mt-5">
-              <button onClick={runOptimization} disabled={isOptimizing}
+              <button onClick={runSimulation} disabled={isOptimizing || isSimulating}
+                className="flex-1 py-3 px-4 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded-xl text-stone-700 font-bold transition-colors flex items-center justify-center gap-2 disabled:opacity-60">
+                {isSimulating ? <><Loader2 className="w-4 h-4 animate-spin" /><span>Simulating…</span></> : <><Play className="w-4 h-4" /><span>SIMULATE</span></>}
+              </button>
+              <button onClick={runOptimization} disabled={isOptimizing || isSimulating}
                 className="flex-1 py-3 px-4 bg-[#8b5a2b] hover:bg-[#7a4f26] border border-[#7a4f26] rounded-xl text-white font-bold shadow-sm transition-colors flex items-center justify-center gap-2 disabled:opacity-60">
                 {isOptimizing
                   ? <><Loader2 className="w-4 h-4 animate-spin" /><span>Optimizing…</span></>
                   : <><Play className="w-4 h-4" /><span>RUN OPTIMIZATION</span></>}
               </button>
-              <button onClick={resetToBaseline} disabled={isOptimizing} title="Reset"
+              <button onClick={resetToBaseline} disabled={isOptimizing || isSimulating} title="Reset"
                 className="py-3 px-4 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded-xl text-stone-600 transition-colors disabled:opacity-60">
                 <RotateCcw className="w-4 h-4" />
               </button>
             </div>
+            {error && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
+            <p className="mt-3 text-xs text-muted">What-if digital-twin simulation only. No field equipment is controlled. Injection pressure is recorded as a scenario input but is not yet coupled into the thermal physics.</p>
           </div>
         </div>
 
@@ -193,20 +211,17 @@ export default function CSSControl() {
             <h3 className="text-sm font-bold text-stone-900 mb-4 uppercase tracking-wide">CSS Performance</h3>
             <div className="space-y-3">
               {[
-                { label: 'Steam-Oil Ratio',  value: perf.steam_oil_ratio.toFixed(1),      baseline: BASELINE.steam_oil_ratio,   lowerIsBetter: true  },
-                { label: 'Cycle Production', value: `${perf.cycle_production} m³`,         baseline: BASELINE.cycle_production,  lowerIsBetter: false },
-                { label: 'Oil Recovery',     value: `${perf.oil_recovery.toFixed(1)}%`,    baseline: BASELINE.oil_recovery,      lowerIsBetter: false },
-                { label: 'Energy/Barrel',    value: `${perf.energy_per_barrel.toFixed(2)} GJ`, baseline: BASELINE.energy_per_barrel, lowerIsBetter: true },
-              ].map(({ label, value, baseline, lowerIsBetter }) => {
-                const num      = parseFloat(value);
-                const improved = lowerIsBetter ? num < baseline : num > baseline;
-                return (
+                { label: 'Steam-Oil Ratio', value: result ? result.output.steam_oil_ratio.toFixed(2) : '--' },
+                { label: 'Cycle Production', value: result ? `${result.output.cycle_production.toFixed(1)} m³` : '--' },
+                { label: 'Energy per Barrel', value: result ? `${result.output.energy_per_barrel.toFixed(3)} GJ` : '--' },
+                { label: 'Ending Temperature', value: result ? `${result.output.ending_temperature.toFixed(1)} °C` : '--' },
+                { label: 'Ending Viscosity', value: result ? `${result.output.ending_viscosity.toFixed(0)} cP` : '--' },
+              ].map(({ label, value }) => (
                   <div key={label} className="flex items-center justify-between">
                     <span className="text-xs text-muted">{label}</span>
-                    <span className={`text-xs font-bold font-mono ${optimized && improved ? 'text-green' : 'text-stone-900'}`}>{value}</span>
+                    <span className={`text-xs font-bold font-mono ${optimized ? 'text-green' : 'text-stone-900'}`}>{value}</span>
                   </div>
-                );
-              })}
+              ))}
             </div>
           </div>
 
@@ -230,32 +245,17 @@ export default function CSSControl() {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-xs text-muted">AI Target</span>
-                <span className="text-lg font-bold font-mono text-green">3.5</span>
+                <span className="text-lg font-bold font-mono text-green">—</span>
               </div>
               <div className="h-px bg-stone-100" />
-              <p className="text-xs text-muted leading-relaxed">During cooling phase, reduce SPM to maintain efficiency and reduce rod float risk</p>
+              <p className="text-xs text-muted leading-relaxed">Recommendation is provided by AI Insights using the current simulated well state.</p>
             </div>
           </div>
 
           {/* Historical cycles */}
           <div className="glass-panel rounded-xl p-4">
             <h3 className="text-sm font-bold text-stone-900 mb-3 uppercase tracking-wide">Historical Cycles</h3>
-            <div className="space-y-2">
-              {[
-                { cycle: 4, production: 145, sor: 3.6 },
-                { cycle: 3, production: 138, sor: 3.8 },
-                { cycle: 2, production: 132, sor: 4.0 },
-                { cycle: 1, production: 125, sor: 4.2 },
-              ].map(({ cycle, production, sor }) => (
-                <div key={cycle} className="flex items-center justify-between text-xs">
-                  <span className="text-muted">Cycle {cycle}</span>
-                  <div className="flex gap-4">
-                    <span className="font-bold font-mono text-stone-900">{production} m³</span>
-                    <span className="text-muted">SOR: {sor}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
+            <p className="text-xs text-muted">Historical cycle storage is not available in this digital-twin demo.</p>
           </div>
         </div>
       </div>

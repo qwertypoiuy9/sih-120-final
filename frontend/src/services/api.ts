@@ -98,18 +98,60 @@ const getDynamometer = async (wellId = 'well-14'): Promise<DynamometerState> => 
   return response.data;
 };
 
-const runSimulation = async (parameters: any, wellId = 'well-14') => {
+const runSimulation = async (parameters: { spm: number }, wellId = 'well-14') => {
   const response = await api.post(`/api/wells/${w(wellId)}/simulation/run`, parameters);
   return response.data;
 };
 
-const runOptimization = async (parameters: any, wellId = 'well-14') => {
+const runOptimization = async (
+  parameters: { objectives: { maximize_production: boolean; minimize_energy: boolean; minimize_rod_float_risk: boolean } },
+  wellId = 'well-14',
+) => {
   const response = await api.post(`/api/wells/${w(wellId)}/optimization/run`, parameters);
   return response.data;
 };
 
-const simulateVFD = async (parameters: { target_spm: number }, wellId = 'well-14') => {
+const simulateVFD = async (parameters: { target_spm: number }, wellId = 'well-14'): Promise<{
+  vfd_result: { current_spm: number; current_frequency: number; target_frequency: number; motor_speed: number };
+  telemetry: Telemetry;
+}> => {
   const response = await api.post(`/api/wells/${w(wellId)}/vfd/simulate`, parameters);
+  return response.data;
+};
+
+export interface CSSCycleParameters {
+  steam_volume: number;
+  steam_injection_rate: number;
+  injection_pressure: number;
+  target_temperature: number;
+  injection_duration: number;
+  soak_duration: number;
+  production_duration: number;
+}
+
+export interface CSSCycleResult {
+  parameters: CSSCycleParameters;
+  steam_oil_ratio: number;
+  cycle_production: number;
+  energy_per_barrel: number;
+  production_rate: number;
+  ending_temperature: number;
+  ending_viscosity: number;
+}
+
+const simulateCSS = async (parameters: CSSCycleParameters, wellId = 'well-14') => {
+  const response = await api.post<{ baseline: CSSCycleResult; simulated: CSSCycleResult }>(
+    `/api/wells/${w(wellId)}/css/simulate`,
+    parameters,
+  );
+  return response.data;
+};
+
+const optimizeCSS = async (parameters: CSSCycleParameters, wellId = 'well-14') => {
+  const response = await api.post<{ baseline: CSSCycleResult; optimized: CSSCycleResult; candidates: CSSCycleResult[] }>(
+    `/api/wells/${w(wellId)}/css/optimize`,
+    parameters,
+  );
   return response.data;
 };
 
@@ -143,6 +185,8 @@ export const apiService = {
   runSimulation,
   runOptimization,
   simulateVFD,
+  simulateCSS,
+  optimizeCSS,
   setScenario,
   getAlerts,
 };

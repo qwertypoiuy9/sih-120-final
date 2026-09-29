@@ -44,7 +44,7 @@ export default function Sidebar({ wellId = 'well-14' }: SidebarProps) {
   const { t }              = useTranslation();
   const location           = useLocation();
   const navigate           = useNavigate();
-  const { isConnected }    = useDigitalTwinStore();
+  const { isConnected, isLoading } = useDigitalTwinStore();
   const { user, logout }   = useAuthStore();
   const { isExpanded, toggle } = useSidebarStore();
   const { unreadCount }    = useFilteredNotifications();
@@ -193,11 +193,13 @@ export default function Sidebar({ wellId = 'well-14' }: SidebarProps) {
         <div className={`
           flex items-center gap-2 rounded-lg px-3 py-1.5 bg-stone-50
           ${isExpanded ? '' : 'justify-center px-2'}
-        `}>
+        `} title="Digital Twin API availability">
           <span className="relative flex-shrink-0">
             {isConnected
-              ? <Wifi    className="w-3.5 h-3.5 text-green" />
-              : <WifiOff className="w-3.5 h-3.5 text-critical" />}
+              ? <Wifi className="w-3.5 h-3.5 text-green" />
+              : isLoading
+                ? <Wifi className="w-3.5 h-3.5 text-stone-400" />
+                : <WifiOff className="w-3.5 h-3.5 text-critical" />}
             {isConnected && (
               <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-green rounded-full animate-pulse" />
             )}
@@ -205,10 +207,10 @@ export default function Sidebar({ wellId = 'well-14' }: SidebarProps) {
           <span className={`
             text-xs font-bold whitespace-nowrap overflow-hidden
             transition-all duration-300
-            ${isConnected ? 'text-green' : 'text-critical'}
+            ${isConnected ? 'text-green' : isLoading ? 'text-stone-400' : 'text-critical'}
             ${isExpanded ? 'w-full opacity-100 translate-x-0' : 'w-0 opacity-0 -translate-x-1 pointer-events-none'}
           `}>
-            {isConnected ? 'ONLINE' : 'OFFLINE'}
+            {isConnected ? 'API ONLINE' : isLoading ? 'CONNECTING' : 'API OFFLINE'}
           </span>
         </div>
 

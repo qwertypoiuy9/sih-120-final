@@ -1,24 +1,31 @@
 import { useDigitalTwinStore } from '../store/digitalTwinStore';
 import { useState } from 'react';
+import { useParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { FlaskConical, Play, RotateCcw } from 'lucide-react';
 
 export default function Simulation() {
   const { telemetry } = useDigitalTwinStore();
+  const { wellId = 'well-14' } = useParams<{ wellId: string }>();
   const [spm, setSpm] = useState(telemetry.spm);
   const [simulationResult, setSimulationResult] = useState<any>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const runSimulation = async () => {
     setIsRunning(true);
+    setError(null);
     try {
-      const result = await apiService.runSimulation({ spm });
+      const result = await apiService.runSimulation({ spm }, wellId);
       setSimulationResult(result);
-    } catch (error) { console.error('Simulation error:', error); }
+    } catch (error) {
+      console.error('Simulation error:', error);
+      setError('Simulation failed. Check the backend connection and SPM range.');
+    }
     finally { setIsRunning(false); }
   };
 
-  const resetSimulation = () => { setSpm(telemetry.spm); setSimulationResult(null); };
+  const resetSimulation = () => { setSpm(telemetry.spm); setSimulationResult(null); setError(null); };
 
   return (
     <div className="p-6 h-full">
@@ -47,6 +54,8 @@ export default function Simulation() {
                 </div>
               </div>
               <div className="h-px bg-stone-100" />
+              {error && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</p>}
+              <p className="text-xs text-muted">What-if model only. Running this scenario does not change the live simulated well or control equipment.</p>
               <div className="flex gap-3">
                 <button onClick={runSimulation} disabled={isRunning}
                   className="flex-1 py-3 px-4 bg-[#8b5a2b] hover:bg-[#7a4f26] border border-[#7a4f26] rounded-xl text-white font-bold shadow-sm transition-colors flex items-center justify-center gap-2 disabled:opacity-50">

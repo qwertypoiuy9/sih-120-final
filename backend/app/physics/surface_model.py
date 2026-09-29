@@ -48,25 +48,18 @@ class SurfaceModel:
         base_spm = 5.0  # SPM at 50 Hz
         return 50.0 * (spm / base_spm)
 
-    def calculate_power_consumption(self, rod_load: float, spm: float, 
+    def calculate_power_consumption(self, rod_load: float, spm: float,
                                      production_rate: float) -> float:
         """
-        Calculate power consumption based on operating conditions
+        Estimate shaft power from rod work per cycle and fluid production.
+
+        rod_load is in kN, stroke length in metres, and SPM in strokes/minute,
+        giving kW for the mechanical rod-work term.
         """
-        # Base power from motor
-        base_power = self.motor_power * (spm / 5.0)
-        
-        # Additional power from rod load
-        load_factor = rod_load / 50.0  # Normalize to max load
-        load_power = base_power * load_factor
-        
-        # Production-related power
-        production_power = production_rate * 0.5  # kW per m3/day
-        
-        # Total power with efficiency
-        total_power = (load_power + production_power) / (self.motor_efficiency * self.vfd_efficiency)
-        
-        return total_power
+        rod_power = abs(rod_load) * 2.5 * max(spm, 0.0) / 60.0
+        production_power = max(production_rate, 0.0) * 0.5
+        efficiency = max(self.motor_efficiency * self.vfd_efficiency, 1e-6)
+        return max(0.0, (rod_power + production_power) / efficiency)
 
     def calculate_pump_efficiency(self, rod_load: float, vibration: float, 
                                   rod_float_risk: float) -> float:
@@ -142,11 +135,11 @@ class SurfaceModel:
         self.power_consumption = self.calculate_power_consumption(
             rod_load, self.current_spm, production_rate
         )
-        self.pump_efficiency = self.calculate_pump_efficiency(
-            rod_load, 0.0, rod_float_risk
-        )
         surface_vibration = self.calculate_surface_vibration(
             rod_load_variance, rod_float_risk, self.current_spm
+        )
+        self.pump_efficiency = self.calculate_pump_efficiency(
+            rod_load, surface_vibration, rod_float_risk
         )
         
         return {
