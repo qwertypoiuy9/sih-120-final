@@ -9,7 +9,7 @@
 
 import axios from 'axios';
 import {
-  Telemetry, ReservoirState, WellboreState,
+  CSSState, Telemetry, ReservoirState, Well, WellboreState,
   SRPState, DynamometerState, AIInsights, Alert, ScenarioType,
 } from '../types';
 
@@ -58,7 +58,7 @@ const getFleetWells = async () => {
 // ---------------------------------------------------------------------------
 // Well-scoped endpoints (all accept wellId)
 // ---------------------------------------------------------------------------
-const getWell = async (wellId = 'well-14') => {
+const getWell = async (wellId = 'well-14'): Promise<Well> => {
   const response = await api.get(`/api/wells/${w(wellId)}/well`);
   return response.data;
 };
@@ -83,7 +83,7 @@ const getSRPState = async (wellId = 'well-14'): Promise<SRPState> => {
   return response.data;
 };
 
-const getCSSState = async (wellId = 'well-14') => {
+const getCSSState = async (wellId = 'well-14'): Promise<CSSState> => {
   const response = await api.get(`/api/wells/${w(wellId)}/css/state`);
   return response.data;
 };

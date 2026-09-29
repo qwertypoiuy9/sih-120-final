@@ -33,6 +33,21 @@ export interface ReservoirState {
   model_type: string;
 }
 
+export interface CSSState {
+  cycle_number: number;
+  phase: string;
+  days_in_phase: number;
+  steam_injection_rate: number;
+  injection_pressure: number;
+  target_temperature: number;
+  production_cutoff: number;
+  steam_oil_ratio: number;
+  cycle_production: number;
+  status: string;
+  current_temperature: number;
+  current_viscosity: number;
+}
+
 export interface WellboreState {
   depth: number;
   casing_depth: number;
