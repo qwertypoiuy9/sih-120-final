@@ -4,7 +4,7 @@
 
 ### Well-to-Surface Digital Twin Prototype for Heavy Oil Operations
 
-**Smart India Hackathon · Baghewala heavy-oil operations prototype**
+**Smart India Hackathon 2026 | Baghewala heavy-oil operations prototype**
 
 [![React](https://img.shields.io/badge/React-18.2-61DAFB?style=flat-square&logo=react&logoColor=white)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
