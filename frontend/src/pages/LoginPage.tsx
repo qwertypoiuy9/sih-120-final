@@ -137,16 +137,16 @@ export default function LoginPage() {
             </h2>
 
             <p className="text-white/75 text-sm lg:text-base leading-relaxed mb-6 max-w-sm">
-              Physics-informed AI monitoring, reservoir simulation, and real-time
-              well optimization — all in one platform.
+              A digital-twin demo with simulated well telemetry, reservoir
+              modeling, and rule-based operating insights.
             </p>
 
             {/* Stat pills */}
             <div className="flex flex-wrap gap-3">
               {[
-                { label: 'Wells Monitored', value: '6' },
-                { label: 'Sensors Online',  value: '24' },
-                { label: 'AI Accuracy',     value: '94%' },
+                { label: 'Demo Wells', value: '6' },
+                { label: 'Field Sensors', value: '0' },
+                { label: 'Insights Model', value: 'DEMO' },
               ].map(({ label, value }) => (
                 <div key={label}
                   className="px-4 py-2 rounded-xl bg-white/10 backdrop-blur-sm border border-white/20">
